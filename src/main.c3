@@ -6,7 +6,9 @@ import sms::prefs;
 
 const int ID_PATH = 1;
 const int MAX_ENTRIES = 16384;
-const float ROW = 32;
+const float ROW = 42;
+const float SIDE_W = 184;
+const float SIDE_ROW = 40;
 char[4096] directory;
 char[4096] path_edit;
 sys::Entry[MAX_ENTRIES] entries;
@@ -17,6 +19,10 @@ int selected = -1;
 float scroll;
 char[128] status;
 float sidebar_scroll;
+int pressed_entry = -1;
+bool dragging;
+rl::RLVector2 press_at;
+char[4096] drag_path;
 
 fn int main(String[] args)
 {
@@ -82,6 +88,8 @@ fn void refilter() => @pool()
 		entry_count == MAX_ENTRIES ? " (display limit reached)" : ""));
 	selected = -1;
 	scroll = 0;
+	pressed_entry = -1;
+	dragging = false;
 }
 
 fn void go(String path)
@@ -90,48 +98,114 @@ fn void go(String path)
 	else { ui::toast("Cannot read this folder", ui::RED); }
 }
 
+fn void add_location(String path)
+{
+	if (!prefs::add(path)) ui::toast("Cannot add location (limit: 32; no newlines in paths)", ui::RED);
+}
+
+// App-specific location rows: icons and labels share the same left edge.
+fn void sidebar_location(Rect row, String path, String name, String icon)
+{
+	if (path == txt::view(&directory)) ui::panel(row, ui::BG2, 4);
+	if (ui::hover(row))
+	{
+		ui::panel(row, ui::BG1, 4);
+		ui::tooltip(path);
+	}
+	ui::text(icon, row.x + 8, row.y + 8, 23, ui::YELLOW);
+	ui::text_fit(name, row.x + 40, row.y + 12, row.width - 44, 16, ui::FG);
+	if (ui::clicked(row)) go(path);
+}
+
 fn void draw_sidebar(float h)
 {
-	ui::panel({ 0, 60, 208, h - 88 }, ui::BG_HARD);
+	Rect bar = { 0, 60, SIDE_W, h - 88 };
+	ui::panel(bar, ui::BG_HARD);
+	if (dragging && ui::point_in(rl::get_mouse_position(), bar)) ui::outline(bar, ui::AQUA, 0, 2);
 	ui::text("LOCATIONS", 16, 77, 12, ui::GRAY);
-	if (ui::icon_button({ 166, 68, 30, 30 }, ui::I_PLUS, ui::FG4, "Add current folder"))
-	{
-		if (!prefs::add(txt::view(&directory))) ui::toast("Cannot add location (limit: 32; no newlines in paths)", ui::RED);
-	}
-	if (ui::button({ 8, 108, 192, 32 }, "Home", GHOST, ui::I_HOME)) go(sys::home());
-	if (ui::button({ 8, 144, 192, 32 }, "File system", GHOST, ui::I_HDD)) go("/");
-	ui::hline(12, 184, 184);
-	Rect area = { 8, 196, 192, h - 232 };
-	float content = (float)prefs::place_count * 36;
+	if (ui::icon_button({ SIDE_W - 42, 68, 30, 30 }, ui::I_PLUS, ui::FG4, "Add current folder (or drag a folder here)")) add_location(txt::view(&directory));
+	sidebar_location({ 8, 104, SIDE_W - 16, 40 }, sys::home(), "Home", ui::I_HOME);
+	sidebar_location({ 8, 144, SIDE_W - 16, 40 }, "/", "File system", ui::I_HDD);
+	ui::hline(12, 192, SIDE_W - 24);
+	Rect area = { 8, 204, SIDE_W - 16, h - 240 };
+	float content = (float)prefs::place_count * SIDE_ROW;
 	sidebar_scroll = ui::scroll_wheel(area, sidebar_scroll, content);
 	ui::begin_clip(area);
-	int first = math::max(0, (int)(sidebar_scroll / 36));
-	int end = math::min(prefs::place_count, first + (int)(area.height / 36) + 2);
+	int first = math::max(0, (int)(sidebar_scroll / SIDE_ROW));
+	int end = math::min(prefs::place_count, first + (int)(area.height / SIDE_ROW) + 2);
 	int remove = -1;
 	for (int i = first; i < end; i++)
 	{
-		float y = area.y + (float)i * 36 - sidebar_scroll;
+		float y = area.y + (float)i * SIDE_ROW - sidebar_scroll;
 		String path = txt::view(&prefs::places[i].path);
-		Rect row = { 8, y, 156, 32 };
-		if (path == txt::view(&directory)) ui::panel(row, ui::BG2, 4);
-		if (ui::hover(row))
-		{
-			ui::panel(row, ui::BG1, 4);
-			ui::tooltip(path);
-		}
-		ui::text(ui::I_FOLDER, 18, y + 7, 16, ui::YELLOW);
-		ui::text_fit(path == "/" ? "/" : txt::basename(path), 44, y + 8, 114, 14, ui::FG);
-		if (ui::clicked(row)) go(path);
-		if (ui::icon_button({ 166, y, 28, 32 }, ui::I_TIMES, ui::GRAY, "Remove saved location")) remove = i;
+		sidebar_location({ 8, y, SIDE_W - 48, SIDE_ROW - 2 }, path, path == "/" ? "/" : txt::basename(path), ui::I_FOLDER);
+		if (ui::icon_button({ SIDE_W - 38, y, 28, SIDE_ROW - 2 }, ui::I_TIMES, ui::GRAY, "Remove saved location")) remove = i;
 	}
 	ui::end_clip();
 	ui::scrollbar(area, sidebar_scroll, content);
 	if (remove >= 0) prefs::remove(remove);
 }
 
+fn void update_drag()
+{
+	if (pressed_entry < 0) return;
+	if (ui::top != 0 || !rl::is_window_focused() || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE))
+	{
+		pressed_entry = -1;
+		dragging = false;
+		return;
+	}
+	rl::RLVector2 mouse = rl::get_mouse_position();
+	float dx = mouse[0] - press_at[0];
+	float dy = mouse[1] - press_at[1];
+	if (dx * dx + dy * dy >= 36) dragging = true;
+	if (!rl::is_mouse_button_down(rl::RLMouseButton.LEFT) && !rl::is_mouse_button_released(rl::RLMouseButton.LEFT))
+	{
+		pressed_entry = -1;
+		dragging = false;
+	}
+}
+
+fn void finish_drag(float h)
+{
+	Rect bar = { 0, 60, SIDE_W, h - 88 };
+	bool over_bar = prefs::sidebar && ui::point_in(rl::get_mouse_position(), bar);
+	if (pressed_entry >= 0 && rl::is_mouse_button_released(rl::RLMouseButton.LEFT))
+	{
+		if (dragging && over_bar && ui::top == 0) add_location(txt::view(&drag_path));
+		pressed_entry = -1;
+		dragging = false;
+	}
+	// External file-manager drops are checked once per drop, never every frame.
+	if (rl::is_file_dropped())
+	{
+		rl::RLFilePathList dropped = rl::load_dropped_files();
+		defer rl::unload_dropped_files(dropped);
+		if (over_bar && ui::top == 0)
+		{
+			for (uint i = 0; i < dropped.count; i++)
+			{
+				String path = dropped.paths[i].str_view();
+				if (!sys::is_dir(path)) continue;
+				char[4096] resolved;
+				sys::realpath(&resolved, path);
+				add_location(txt::view(&resolved));
+			}
+		}
+	}
+	if (dragging)
+	{
+		rl::RLVector2 mouse = rl::get_mouse_position();
+		ui::panel({ mouse[0] + 14, mouse[1] + 14, 210, 42 }, ui::BG_HARD, 4);
+		ui::text(ui::I_FOLDER, mouse[0] + 24, mouse[1] + 22, 23, ui::YELLOW);
+		ui::text_fit(txt::basename(txt::view(&drag_path)), mouse[0] + 56, mouse[1] + 27, 154, 16, ui::FG);
+	}
+}
+
 fn void frame() => @pool()
 {
 	ui::frame_begin();
+	update_drag();
 	float w = ui::sw();
 	float h = ui::sh();
 	if (ui::top == 0 && ui::ctrl_down() && ui::letter('l')) ui::focus_on(ID_PATH, &path_edit);
@@ -164,7 +238,7 @@ fn void frame() => @pool()
 	if (prefs::sidebar)
 	{
 		draw_sidebar(h);
-		left = 216;
+		left = SIDE_W + 8;
 	}
 	Rect list = { left, 68, w - left - 8, h - 104 };
 	float content = (float)visible_count * ROW;
@@ -181,14 +255,22 @@ fn void frame() => @pool()
 		bool hovered = ui::hover(row);
 		if (selected == i) { ui::panel(row, ui::BG2, 4); }
 		else if (hovered) { ui::panel(row, ui::BG1, 4); }
-		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12, row.y + 7, 17, entry.dir ? ui::YELLOW : ui::GRAY);
-		ui::text_fit(txt::view(&entry.name), row.x + 42, row.y + 8, row.width - 54, 15, ui::FG);
+		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12, row.y + 8, 25, entry.dir ? ui::YELLOW : ui::GRAY);
+		ui::text_fit(txt::view(&entry.name), row.x + 50, row.y + 13, row.width - 62, 17, ui::FG);
 		if (ui::clicked(row))
 		{
 			selected = i;
 			ui::unfocus();
-			if (entry.dir) enter = visible[i];
+			if (entry.dir)
+			{
+				pressed_entry = visible[i];
+				press_at = rl::get_mouse_position();
+				dragging = false;
+				txt::set(&drag_path, txt::join(txt::view(&directory), txt::view(&entry.name)));
+			}
 		}
+		// Opening on release leaves room for a drag without opening the folder first.
+		if (entry.dir && pressed_entry == visible[i] && !dragging && hovered && ui::live() && rl::is_mouse_button_released(rl::RLMouseButton.LEFT)) enter = visible[i];
 	}
 	if (!visible_count) ui::text("Empty folder", list.x + 16, list.y + 16, 15, ui::GRAY);
 	ui::end_clip();
@@ -197,5 +279,6 @@ fn void frame() => @pool()
 	if (enter >= 0) go(txt::join(txt::view(&directory), txt::view(&entries[enter].name)));
 	ui::panel({ 0, h - 28, w, 28 }, ui::BG_HARD);
 	ui::text(txt::view(&status), 16, h - 21, 13, ui::GRAY);
+	finish_drag(h);
 	ui::frame_end();
 }

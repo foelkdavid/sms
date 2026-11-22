@@ -9,14 +9,17 @@ c3c build
 ./build/sms -d /tmp
 ```
 
-Click a folder to enter it. Files are listed and selectable; launching files and file operations are intentionally not implemented yet. Hidden files are hidden by default; Ctrl+H toggles them using the cached listing (no filesystem rescan). Folders sort first, then names case-insensitively.
+Click a folder to enter it (opens on mouse release, so you can drag it instead). Files are listed and selectable; launching files and file operations are intentionally not implemented yet. Hidden files are hidden by default; Ctrl+H toggles them using the cached listing (no filesystem rescan). Folders sort first, then names case-insensitively.
 
 - **Up / Backspace:** parent folder
 - **Home button:** home folder
 - **Ctrl+L:** edit the path; Enter navigates (relative paths use the displayed folder)
 - **Ctrl+H:** show/hide hidden files (hidden on first launch; remembered thereafter)
 - **Ctrl+S:** show/hide the locations sidebar (visible on first launch; remembered thereafter)
-- **Sidebar +:** save the current folder as a location; click a location to browse it, or its × to remove it. Home and File system are built in.
+- **Sidebar +:** save the current folder as a location; or drag a folder from the file list onto the sidebar. A small movement threshold distinguishes dragging from a click. Escape cancels a drag; dropping elsewhere does nothing. This only saves a shortcut—it never moves the folder.
+- Folders dropped onto the visible sidebar from another file manager are also accepted (where supported by the window system). Files are ignored; duplicate locations are not added.
+- Click a saved location to browse it, or its × to remove it. Home and File system are built in. The sidebar is 184 logical px wide with left-aligned icons and labels.
+- Larger list rows (42 logical px), 25 px icons, and 17 px filenames make folders easier to see; Ctrl +/-/0 still scales the whole UI.
 - **Refresh / F5:** reload the listing
 - **Ctrl +/-/0:** UI zoom
 
