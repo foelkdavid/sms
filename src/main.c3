@@ -39,7 +39,7 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Click a folder to enter it.\nCtrl+L: edit path; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Backspace: parent; F5: refresh.");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Click a folder to enter it.\nCtrl+L: edit path; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Backspace: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
@@ -48,7 +48,8 @@ fn int main(String[] args)
 	prefs::load();
 	defer { if (!prefs::save()) io::eprintfn("sms: could not save settings"); }
 	if (!navigate(start)) { io::eprintfn("sms: cannot read folder: %s", start); return 1; }
-	ui::open("sms", 900, 640, 480, 320);
+	ui::open("sms", 900, 640, 480, 320, (float)prefs::ui_percent / 100);
+	ui::zoom_shift_only = true;
 	defer ui::close();
 	ui::app_args(args);
 	while (ui::running()) frame();
@@ -124,7 +125,7 @@ fn void draw_sidebar(float h)
 	Rect bar = { 0, 60, SIDE_W, h - 88 };
 	ui::panel(bar, ui::BG_HARD);
 	if (dragging && ui::point_in(rl::get_mouse_position(), bar)) ui::outline(bar, ui::AQUA, 0, 2);
-	ui::text("LOCATIONS", 16, 77, 12, ui::GRAY);
+	ui::text("LOCATIONS", 16, 76, 15, ui::GRAY);
 	if (ui::icon_button({ SIDE_W - 42, 68, 30, 30 }, ui::I_PLUS, ui::FG4, "Add current folder (or drag a folder here)")) add_location(txt::view(&directory));
 	sidebar_location({ 8, 104, SIDE_W - 16, 40 }, sys::home(), "Home", ui::I_HOME);
 	sidebar_location({ 8, 144, SIDE_W - 16, 40 }, "/", "File system", ui::I_HDD);
@@ -207,6 +208,26 @@ fn void finish_drag(float h)
 fn void frame() => @pool()
 {
 	ui::frame_begin();
+	if (ui::zoom_changed)
+	{
+		prefs::ui_percent = (int)math::round(ui::scale * 100);
+		prefs::dirty = true;
+	}
+	if (ui::top == 0 && ui::focus < 0 && ui::ctrl_down() && !ui::shift_down())
+	{
+		int previous = prefs::content_percent;
+		int percent = math::clamp(previous + ui::zoom_step() * 10, 50, 250);
+		if (rl::is_key_pressed(rl::RLKeyboardKey.ZERO)) percent = 100;
+		if (percent != previous)
+		{
+			prefs::content_percent = percent;
+			prefs::dirty = true;
+			scroll *= (float)percent / (float)previous;
+			pressed_entry = -1;
+			dragging = false;
+			ui::toast(string::tformat("Content scale %d%%", percent));
+		}
+	}
 	update_drag();
 	float w = ui::sw();
 	float h = ui::sh();
@@ -245,23 +266,27 @@ fn void frame() => @pool()
 	Rect list = { left, 68, w - left - 8, h - 104 };
 	int parent_rows = txt::view(&directory) == "/" ? 0 : 1;
 	int row_count = visible_count + parent_rows;
-	float content = (float)row_count * ROW;
+	float content_scale = (float)prefs::content_percent / 100;
+	float row_h = ROW * content_scale;
+	float icon_size = FILE_ICON * content_scale;
+	float text_size = FILE_TEXT * content_scale;
+	float content = (float)row_count * row_h;
 	scroll = ui::scroll_wheel(list, scroll, content);
 	ui::begin_clip(list);
 	// Virtualized list: visit only the rows that can actually be seen.
-	int first = math::max(0, (int)(scroll / ROW));
-	int end = math::min(row_count, first + (int)(list.height / ROW) + 2);
+	int first = math::max(0, (int)(scroll / row_h));
+	int end = math::min(row_count, first + (int)(list.height / row_h) + 2);
 	int enter = -1;
 	bool go_up;
 	for (int i = first; i < end; i++)
 	{
-		Rect row = { list.x, list.y + (float)i * ROW - scroll, list.width - 10, ROW };
+		Rect row = { list.x, list.y + (float)i * row_h - scroll, list.width - 10, row_h };
 		bool hovered = ui::hover(row);
 		if (parent_rows && i == 0)
 		{
 			if (hovered) ui::panel(row, ui::BG1, 4);
-			ui::text(ui::I_UP, row.x + 12, row.y + (ROW - FILE_ICON) / 2, FILE_ICON, ui::YELLOW);
-			ui::text("../", row.x + 60, row.y + (ROW - FILE_TEXT) / 2, FILE_TEXT, ui::FG);
+			ui::text(ui::I_UP, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, ui::YELLOW);
+			ui::text("../", row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, text_size, ui::FG);
 			if (ui::clicked(row)) go_up = true;
 			continue;
 		}
@@ -269,8 +294,8 @@ fn void frame() => @pool()
 		sys::Entry* entry = &entries[visible[vi]];
 		if (selected == vi) { ui::panel(row, ui::BG2, 4); }
 		else if (hovered) { ui::panel(row, ui::BG1, 4); }
-		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12, row.y + (ROW - FILE_ICON) / 2, FILE_ICON, entry.dir ? ui::YELLOW : ui::GRAY);
-		ui::text_fit(txt::view(&entry.name), row.x + 60, row.y + (ROW - FILE_TEXT) / 2, row.width - 72, FILE_TEXT, ui::FG);
+		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, entry.dir ? ui::YELLOW : ui::GRAY);
+		ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, ui::FG);
 		if (ui::clicked(row))
 		{
 			selected = vi;
@@ -286,14 +311,14 @@ fn void frame() => @pool()
 		// Opening on release leaves room for a drag without opening the folder first.
 		if (entry.dir && pressed_entry == visible[vi] && !dragging && hovered && ui::live() && rl::is_mouse_button_released(rl::RLMouseButton.LEFT)) enter = visible[vi];
 	}
-	if (!visible_count) ui::text("Empty folder", list.x + 16, list.y + (float)parent_rows * ROW + 16, 15, ui::GRAY);
+	if (!visible_count) ui::text("Empty folder", list.x + 16 * content_scale, list.y + (float)parent_rows * row_h + 16 * content_scale, text_size, ui::GRAY);
 	ui::end_clip();
 	ui::scrollbar(list, scroll, content);
 	// Navigate after drawing: do not mutate the entry array during iteration.
 	if (go_up) { go(txt::dirname(txt::view(&directory))); }
 	else if (enter >= 0) { go(txt::join(txt::view(&directory), txt::view(&entries[enter].name))); }
 	ui::panel({ 0, h - 28, w, 28 }, ui::BG_HARD);
-	ui::text(txt::view(&status), 16, h - 21, 13, ui::GRAY);
+	ui::text(txt::view(&status), 16, h - 22, 16, ui::GRAY);
 	finish_drag(h);
 	ui::frame_end();
 }

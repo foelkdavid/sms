@@ -19,9 +19,11 @@ Click a folder to enter it (opens on mouse release, so you can drag it instead).
 - **Sidebar +:** save the current folder as a location; or drag a folder from the file list onto the sidebar. A small movement threshold distinguishes dragging from a click. Escape cancels a drag; dropping elsewhere does nothing. This only saves a shortcut—it never moves the folder.
 - Folders dropped onto the visible sidebar from another file manager are also accepted (where supported by the window system). Files are ignored; duplicate locations are not added.
 - Click a saved location to browse it, or its × to remove it. Home and File system are built in. The sidebar is 184 logical px wide with left-aligned icons and labels.
-- Larger list rows (42 logical px), 25 px icons, and 17 px filenames make folders easier to see; Ctrl +/-/0 still scales the whole UI.
+- File rows start at 54 logical px, with 32 px icons and 20 px filenames. LOCATIONS uses 15 px text; the item count uses 16 px.
 - **Refresh / F5:** reload the listing
-- **Ctrl +/-/0:** UI zoom
+- **Ctrl +/−:** file-list zoom, in 10% steps (50–250%); **Ctrl+0** resets it to 100%
+- **Ctrl+Shift +/−:** whole-UI zoom, in 25% steps (75–300%); **Ctrl+Shift+0** resets it to the monitor default
+- Both zoom levels are remembered. Plus/minus keys follow the keyboard layout; keypad +/− also work.
 
 The desktop launcher `sms.desktop` opens `~`. It uses absolute paths for this checkout; update `Exec` and `Path` if moving the project. Install with:
 
@@ -31,7 +33,7 @@ install -Dm644 sms.desktop ~/.local/share/applications/sms.desktop
 
 ## Remembered settings
 
-Hidden-file visibility, sidebar visibility, and up to 32 saved locations are saved on normal exit to `$XDG_CONFIG_HOME/sms/settings` (default `~/.config/sms/settings`). The current directory is not remembered: startup still uses the working directory or `--dir` / `-d`. No settings writes happen per frame. Simultaneous instances use last-exit-wins settings.
+Hidden-file visibility, sidebar visibility, content and UI scales, and up to 32 saved locations are saved on normal exit to `$XDG_CONFIG_HOME/sms/settings` (default `~/.config/sms/settings`). The current directory is not remembered: startup still uses the working directory or `--dir` / `-d`. No settings writes happen per frame. Simultaneous instances use last-exit-wins settings.
 
 ## Font and third-party licensing
 
@@ -46,6 +48,8 @@ Performance is a permanent project priority; see [AGENTS.md](AGENTS.md). Optimiz
 Current boundaries: directory reads are synchronous on navigation, with a visible limit warning at 16,384 entries. Slow/network folders can still block navigation. Rendering currently uses bmu's standard 60 FPS loop; it is not event-driven. No startup or navigation latency guarantees have been measured yet.
 
 ## Checks
+
+`python3 tests/zoom.py` checks zoom shortcuts, independent scales, persistence, resets, and malformed settings under a temporary `XDG_CONFIG_HOME` (requires a visible X11 display and XTest).
 
 ```sh
 ./build/sms --help
