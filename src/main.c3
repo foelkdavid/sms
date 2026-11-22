@@ -2,6 +2,7 @@ module sms;
 import std::math, std::core::string, std::io;
 import raylib6::rl;
 import bmu::ui, bmu::txt, bmu::sys;
+import sms::prefs;
 
 const int ID_PATH = 1;
 const int MAX_ENTRIES = 16384;
@@ -12,10 +13,10 @@ sys::Entry[MAX_ENTRIES] entries;
 int entry_count;
 int[MAX_ENTRIES] visible;
 int visible_count;
-bool show_hidden;
 int selected = -1;
 float scroll;
 char[128] status;
+float sidebar_scroll;
 
 fn int main(String[] args)
 {
@@ -30,12 +31,14 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Click a folder to enter it.\nCtrl+L: edit path; Ctrl+H: toggle hidden files; Backspace: parent; F5: refresh.");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Click a folder to enter it.\nCtrl+L: edit path; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Backspace: parent; F5: refresh.");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
 		}
 	}
+	prefs::load();
+	defer { if (!prefs::save()) io::eprintfn("sms: could not save settings"); }
 	if (!navigate(start)) { io::eprintfn("sms: cannot read folder: %s", start); return 1; }
 	ui::open("sms", 900, 640, 480, 320);
 	defer ui::close();
@@ -72,10 +75,10 @@ fn void refilter() => @pool()
 	visible_count = 0;
 	for (int i = 0; i < entry_count; i++)
 	{
-		if (show_hidden || entries[i].name[0] != '.') visible[visible_count++] = i;
+		if (prefs::hidden || entries[i].name[0] != '.') visible[visible_count++] = i;
 	}
 	txt::set(&status, string::tformat("%d items%s%s", visible_count,
-		show_hidden ? " · hidden shown" : "",
+		prefs::hidden ? " · hidden shown" : "",
 		entry_count == MAX_ENTRIES ? " (display limit reached)" : ""));
 	selected = -1;
 	scroll = 0;
@@ -85,6 +88,45 @@ fn void go(String path)
 {
 	if (navigate(path)) { ui::unfocus(); }
 	else { ui::toast("Cannot read this folder", ui::RED); }
+}
+
+fn void draw_sidebar(float h)
+{
+	ui::panel({ 0, 60, 208, h - 88 }, ui::BG_HARD);
+	ui::text("LOCATIONS", 16, 77, 12, ui::GRAY);
+	if (ui::icon_button({ 166, 68, 30, 30 }, ui::I_PLUS, ui::FG4, "Add current folder"))
+	{
+		if (!prefs::add(txt::view(&directory))) ui::toast("Cannot add location (limit: 32; no newlines in paths)", ui::RED);
+	}
+	if (ui::button({ 8, 108, 192, 32 }, "Home", GHOST, ui::I_HOME)) go(sys::home());
+	if (ui::button({ 8, 144, 192, 32 }, "File system", GHOST, ui::I_HDD)) go("/");
+	ui::hline(12, 184, 184);
+	Rect area = { 8, 196, 192, h - 232 };
+	float content = (float)prefs::place_count * 36;
+	sidebar_scroll = ui::scroll_wheel(area, sidebar_scroll, content);
+	ui::begin_clip(area);
+	int first = math::max(0, (int)(sidebar_scroll / 36));
+	int end = math::min(prefs::place_count, first + (int)(area.height / 36) + 2);
+	int remove = -1;
+	for (int i = first; i < end; i++)
+	{
+		float y = area.y + (float)i * 36 - sidebar_scroll;
+		String path = txt::view(&prefs::places[i].path);
+		Rect row = { 8, y, 156, 32 };
+		if (path == txt::view(&directory)) ui::panel(row, ui::BG2, 4);
+		if (ui::hover(row))
+		{
+			ui::panel(row, ui::BG1, 4);
+			ui::tooltip(path);
+		}
+		ui::text(ui::I_FOLDER, 18, y + 7, 16, ui::YELLOW);
+		ui::text_fit(path == "/" ? "/" : txt::basename(path), 44, y + 8, 114, 14, ui::FG);
+		if (ui::clicked(row)) go(path);
+		if (ui::icon_button({ 166, y, 28, 32 }, ui::I_TIMES, ui::GRAY, "Remove saved location")) remove = i;
+	}
+	ui::end_clip();
+	ui::scrollbar(area, sidebar_scroll, content);
+	if (remove >= 0) prefs::remove(remove);
 }
 
 fn void frame() => @pool()
@@ -97,8 +139,14 @@ fn void frame() => @pool()
 	{
 		if (ui::ctrl_down() && ui::letter('h'))
 		{
-			show_hidden = !show_hidden;
+			prefs::hidden = !prefs::hidden;
+			prefs::dirty = true;
 			refilter();
+		}
+		if (ui::ctrl_down() && ui::letter('s'))
+		{
+			prefs::sidebar = !prefs::sidebar;
+			prefs::dirty = true;
 		}
 		if (rl::is_key_pressed(rl::RLKeyboardKey.BACKSPACE)) go(txt::dirname(txt::view(&directory)));
 		if (rl::is_key_pressed(rl::RLKeyboardKey.F5)) go(txt::view(&directory));
@@ -112,7 +160,13 @@ fn void frame() => @pool()
 	if (ui::icon_button({ w - 44, 12, 32, 36 }, ui::I_REFRESH, ui::FG4, "Refresh (F5)")) go(txt::view(&directory));
 	ui::hline(0, 59, w);
 
-	Rect list = { 8, 68, w - 16, h - 104 };
+	float left = 8;
+	if (prefs::sidebar)
+	{
+		draw_sidebar(h);
+		left = 216;
+	}
+	Rect list = { left, 68, w - left - 8, h - 104 };
 	float content = (float)visible_count * ROW;
 	scroll = ui::scroll_wheel(list, scroll, content);
 	ui::begin_clip(list);

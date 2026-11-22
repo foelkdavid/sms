@@ -14,7 +14,9 @@ Click a folder to enter it. Files are listed and selectable; launching files and
 - **Up / Backspace:** parent folder
 - **Home button:** home folder
 - **Ctrl+L:** edit the path; Enter navigates (relative paths use the displayed folder)
-- **Ctrl+H:** show/hide hidden files (retained while browsing; resets to hidden on startup)
+- **Ctrl+H:** show/hide hidden files (hidden on first launch; remembered thereafter)
+- **Ctrl+S:** show/hide the locations sidebar (visible on first launch; remembered thereafter)
+- **Sidebar +:** save the current folder as a location; click a location to browse it, or its × to remove it. Home and File system are built in.
 - **Refresh / F5:** reload the listing
 - **Ctrl +/-/0:** UI zoom
 
@@ -23,6 +25,16 @@ The desktop launcher `sms.desktop` opens `~`. It uses absolute paths for this ch
 ```sh
 install -Dm644 sms.desktop ~/.local/share/applications/sms.desktop
 ```
+
+## Remembered settings
+
+Hidden-file visibility, sidebar visibility, and up to 32 saved locations are saved on normal exit to `$XDG_CONFIG_HOME/sms/settings` (default `~/.config/sms/settings`). The current directory is not remembered: startup still uses the working directory or `--dir` / `-d`. No settings writes happen per frame. Simultaneous instances use last-exit-wins settings.
+
+## Font and third-party licensing
+
+The embedded CodeNewRoman Nerd Font Propo is supplied by bmu under SIL OFL 1.1. Embedding it in an app, including a commercial app, is permitted. Distribute the copyright notice and complete license with each copy: [licenses/FONT-OFL.txt](licenses/FONT-OFL.txt). Keep the font under OFL; do not sell it on its own. Modified fonts must respect any reserved font names; do not imply author endorsement. The OFL does not require the application code to use OFL.
+
+This describes the license bundled with the font; it is not an independent audit of the patched glyphs' upstream provenance. Preserve upstream notices when replacing/updating the font. raylib's notice is in [licenses/RAYLIB-LICENSE.txt](licenses/RAYLIB-LICENSE.txt). Ship the `licenses/` directory with binary releases (embedding the font alone does not make these notices easily accessible). bmu's application/library code currently has no chosen license, separate from the font and raylib licenses; choose/confirm code licensing before public distribution.
 
 ## Performance
 
