@@ -2,7 +2,7 @@ module sms;
 import std::math, std::core::string, std::io;
 import raylib6::rl;
 import bmu::ui, bmu::txt, bmu::sys;
-import sms::prefs;
+import sms::prefs, sms::preview;
 
 const int ID_PATH = 1;
 const int MAX_ENTRIES = 16384;
@@ -51,6 +51,7 @@ fn int main(String[] args)
 	ui::open("sms", 900, 640, 480, 320, (float)prefs::ui_percent / 100);
 	ui::zoom_shift_only = true;
 	defer ui::close();
+	defer preview::close();
 	ui::app_args(args);
 	while (ui::running()) frame();
 	return 0;
@@ -81,6 +82,7 @@ fn bool navigate(String path) => @pool()
 // Toggle against the cached listing: no disk I/O or sorting needed.
 fn void refilter() => @pool()
 {
+	preview::clear();
 	visible_count = 0;
 	for (int i = 0; i < entry_count; i++)
 	{
@@ -229,6 +231,7 @@ fn void frame() => @pool()
 		}
 	}
 	update_drag();
+	preview::poll();
 	float w = ui::sw();
 	float h = ui::sh();
 	if (ui::top == 0 && ui::ctrl_down() && ui::letter('l')) ui::focus_on(ID_PATH, &path_edit);
@@ -263,7 +266,10 @@ fn void frame() => @pool()
 		draw_sidebar(h);
 		left = SIDE_W + 8;
 	}
-	Rect list = { left, 68, w - left - 8, h - 104 };
+	bool show_preview = preview::active;
+	float preview_w = show_preview ? math::min(360.0f, (w - left - 8) * 0.45f) : 0;
+	Rect list = { left, 68, w - left - 8 - (show_preview ? preview_w + 8 : 0), h - 104 };
+	Rect preview_panel = { w - preview_w - 8, 68, preview_w, h - 104 };
 	int parent_rows = txt::view(&directory) == "/" ? 0 : 1;
 	int row_count = visible_count + parent_rows;
 	float content_scale = (float)prefs::content_percent / 100;
@@ -298,6 +304,11 @@ fn void frame() => @pool()
 		ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, ui::FG);
 		if (ui::clicked(row))
 		{
+			if (selected != vi)
+			{
+				if (entry.dir) { preview::clear(); }
+				else { preview::select(txt::join(txt::view(&directory), txt::view(&entry.name))); }
+			}
 			selected = vi;
 			ui::unfocus();
 			if (entry.dir)
@@ -317,6 +328,7 @@ fn void frame() => @pool()
 	// Navigate after drawing: do not mutate the entry array during iteration.
 	if (go_up) { go(txt::dirname(txt::view(&directory))); }
 	else if (enter >= 0) { go(txt::join(txt::view(&directory), txt::view(&entries[enter].name))); }
+	if (show_preview && preview::active) preview::draw(preview_panel);
 	ui::panel({ 0, h - 28, w, 28 }, ui::BG_HARD);
 	ui::text(txt::view(&status), 16, h - 22, 16, ui::GRAY);
 	finish_drag(h);

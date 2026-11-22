@@ -5,6 +5,7 @@ Uses only temporary settings and Python's standard library + X11/XTest.
 import ctypes as c
 import ctypes.util
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -22,6 +23,9 @@ root = x.XDefaultRootWindow(display)
 x.XQueryTree.argtypes = [c.c_void_p, c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_ulong), c.POINTER(c.POINTER(c.c_ulong)), c.POINTER(c.c_uint)]
 x.XFetchName.argtypes = [c.c_void_p, c.c_ulong, c.POINTER(c.c_char_p)]
 x.XFree.argtypes = [c.c_void_p]
+x.XInternAtom.argtypes = [c.c_void_p, c.c_char_p, c.c_int]
+x.XInternAtom.restype = c.c_ulong
+x.XGetWindowProperty.argtypes = [c.c_void_p, c.c_ulong, c.c_ulong, c.c_long, c.c_long, c.c_int, c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_int), c.POINTER(c.c_ulong), c.POINTER(c.c_ulong), c.POINTER(c.c_void_p)]
 x.XSetInputFocus.argtypes = [c.c_void_p, c.c_ulong, c.c_int, c.c_ulong]
 x.XKeysymToKeycode.argtypes = [c.c_void_p, c.c_ulong]
 x.XKeysymToKeycode.restype = c.c_uint
@@ -29,21 +33,29 @@ x.XFlush.argtypes = [c.c_void_p]
 xt.XTestFakeKeyEvent.argtypes = [c.c_void_p, c.c_uint, c.c_int, c.c_ulong]
 
 
-def find_window(window):
+def find_window(window, pid):
     name = c.c_char_p()
     x.XFetchName(display, window, c.byref(name))
     match = name.value == b'sms'
     if name:
         x.XFree(name)
     if match:
-        return window
+        kind, fmt, count, remaining, data = c.c_ulong(), c.c_int(), c.c_ulong(), c.c_ulong(), c.c_void_p()
+        atom = x.XInternAtom(display, b'_NET_WM_PID', True)
+        x.XGetWindowProperty(display, window, atom, 0, 1, False, 0, c.byref(kind), c.byref(fmt), c.byref(count), c.byref(remaining), c.byref(data))
+        try:
+            if data and count.value and c.cast(data, c.POINTER(c.c_ulong))[0] == pid:
+                return window
+        finally:
+            if data:
+                x.XFree(data)
     tree_root, parent, count = c.c_ulong(), c.c_ulong(), c.c_uint()
     children = c.POINTER(c.c_ulong)()
     if not x.XQueryTree(display, window, c.byref(tree_root), c.byref(parent), c.byref(children), c.byref(count)):
         return None
     try:
         for i in range(count.value):
-            result = find_window(children[i])
+            result = find_window(children[i], pid)
             if result:
                 return result
     finally:
@@ -90,8 +102,11 @@ with tempfile.TemporaryDirectory(prefix='sms-zoom-test-') as temp:
             window = None
             while time.monotonic() < deadline and not window:
                 time.sleep(.05)
-                window = find_window(root)
+                window = find_window(root, process.pid)
             assert window, 'sms window did not appear'
+            time.sleep(.4)
+            if os.environ.get('HYPRLAND_INSTANCE_SIGNATURE') and shutil.which('hyprctl'):
+                subprocess.run(['hyprctl', 'dispatch', 'focuswindow', f'pid:{process.pid}'], check=True, stdout=subprocess.DEVNULL)
             x.XSetInputFocus(display, window, 1, 0)
             x.XFlush(display)
             time.sleep(.6)

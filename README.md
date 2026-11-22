@@ -9,7 +9,7 @@ c3c build
 ./build/sms -d /tmp
 ```
 
-Click a folder to enter it (opens on mouse release, so you can drag it instead). Files are listed and selectable; launching files and file operations are intentionally not implemented yet. Hidden files are hidden by default; Ctrl+H toggles them using the cached listing (no filesystem rescan). Folders sort first, then names case-insensitively.
+Click a folder to enter it (opens on mouse release, so you can drag it instead). Files are listed and selectable; select a supported image to preview it. Launching files and file operations are intentionally not implemented yet. Hidden files are hidden by default; Ctrl+H toggles them using the cached listing (no filesystem rescan). Folders sort first, then names case-insensitively.
 
 - **../ row / Up / Backspace:** parent folder (`../` appears first in the list, except at filesystem root)
 - **Home button:** home folder
@@ -31,6 +31,20 @@ The desktop launcher `sms.desktop` opens `~`. It uses absolute paths for this ch
 install -Dm644 sms.desktop ~/.local/share/applications/sms.desktop
 ```
 
+## Image preview
+
+Select a **PNG, JPEG, BMP, or GIF** to show a right-hand preview, fitted without stretching or enlarging beyond
+its cached pixel resolution. The panel shows the filename and original dimensions. GIF previews use the first
+frame; EXIF rotation is not applied. Selecting a non-image/folder, navigating, refreshing, or toggling hidden files
+clears the preview. There are no thumbnails or persisted preview state.
+
+Reading, decoding, and downsampling happen on a lazy background worker in bmu; rapid selections replace pending
+work and discard stale results. Only the current preview texture is retained. GPU upload happens once on the UI
+thread, not every frame. Files over **32 MiB**, images over **32 megapixels**, or edges over **16384 px** show a
+limit message; previews are downsampled to a maximum **1600 px** edge. Decoding still temporarily needs the full
+source bitmap and workspace (the preview-size limit is not a total-memory cap). Closing waits for any in-flight
+read/decode; slow/network filesystem reads cannot be interrupted here. SVG/WebP previews are not included.
+
 ## Remembered settings
 
 Hidden-file visibility, sidebar visibility, content and UI scales, and up to 32 saved locations are saved on normal exit to `$XDG_CONFIG_HOME/sms/settings` (default `~/.config/sms/settings`). The current directory is not remembered: startup still uses the working directory or `--dir` / `-d`. No settings writes happen per frame. Simultaneous instances use last-exit-wins settings.
@@ -48,6 +62,10 @@ Performance is a permanent project priority; see [AGENTS.md](AGENTS.md). Optimiz
 Current boundaries: directory reads are synchronous on navigation, with a visible limit warning at 16,384 entries. Slow/network folders can still block navigation. Rendering currently uses bmu's standard 60 FPS loop; it is not event-driven. No startup or navigation latency guarantees have been measured yet.
 
 ## Checks
+
+`python3 tests/preview.py` checks image selection, aspect ratios, transparency, stale-result replacement, errors,
+limits, and clearing on navigation/non-image selection (requires visible X11/XTest and Pillow; Hyprland uses
+`hyprctl` for pointer placement). Tests locate their own process window, not an already-running sms window.
 
 `python3 tests/zoom.py` checks zoom shortcuts, independent scales, persistence, resets, and malformed settings under a temporary `XDG_CONFIG_HOME` (requires a visible X11 display and XTest).
 
