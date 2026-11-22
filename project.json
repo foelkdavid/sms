@@ -1,0 +1,15 @@
+{
+  "langrev": "1",
+  "version": "0.1.0",
+  "opt": "O2",
+  "build-dir": "build",
+  "output": "build",
+  "dependency-search-paths": ["bmu/lib"],
+  "targets": {
+    "sms": {
+      "type": "executable",
+      "sources": ["src/**"],
+      "dependencies": ["raylib6", "bmu"]
+    }
+  }
+}
