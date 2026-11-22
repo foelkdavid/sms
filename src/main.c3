@@ -241,42 +241,55 @@ fn void frame() => @pool()
 		left = SIDE_W + 8;
 	}
 	Rect list = { left, 68, w - left - 8, h - 104 };
-	float content = (float)visible_count * ROW;
+	int parent_rows = txt::view(&directory) == "/" ? 0 : 1;
+	int row_count = visible_count + parent_rows;
+	float content = (float)row_count * ROW;
 	scroll = ui::scroll_wheel(list, scroll, content);
 	ui::begin_clip(list);
 	// Virtualized list: visit only the rows that can actually be seen.
 	int first = math::max(0, (int)(scroll / ROW));
-	int end = math::min(visible_count, first + (int)(list.height / ROW) + 2);
+	int end = math::min(row_count, first + (int)(list.height / ROW) + 2);
 	int enter = -1;
+	bool go_up;
 	for (int i = first; i < end; i++)
 	{
 		Rect row = { list.x, list.y + (float)i * ROW - scroll, list.width - 10, ROW };
-		sys::Entry* entry = &entries[visible[i]];
 		bool hovered = ui::hover(row);
-		if (selected == i) { ui::panel(row, ui::BG2, 4); }
+		if (parent_rows && i == 0)
+		{
+			if (hovered) ui::panel(row, ui::BG1, 4);
+			ui::text(ui::I_UP, row.x + 12, row.y + 8, 25, ui::YELLOW);
+			ui::text("../", row.x + 50, row.y + 13, 17, ui::FG);
+			if (ui::clicked(row)) go_up = true;
+			continue;
+		}
+		int vi = i - parent_rows;
+		sys::Entry* entry = &entries[visible[vi]];
+		if (selected == vi) { ui::panel(row, ui::BG2, 4); }
 		else if (hovered) { ui::panel(row, ui::BG1, 4); }
 		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12, row.y + 8, 25, entry.dir ? ui::YELLOW : ui::GRAY);
 		ui::text_fit(txt::view(&entry.name), row.x + 50, row.y + 13, row.width - 62, 17, ui::FG);
 		if (ui::clicked(row))
 		{
-			selected = i;
+			selected = vi;
 			ui::unfocus();
 			if (entry.dir)
 			{
-				pressed_entry = visible[i];
+				pressed_entry = visible[vi];
 				press_at = rl::get_mouse_position();
 				dragging = false;
 				txt::set(&drag_path, txt::join(txt::view(&directory), txt::view(&entry.name)));
 			}
 		}
 		// Opening on release leaves room for a drag without opening the folder first.
-		if (entry.dir && pressed_entry == visible[i] && !dragging && hovered && ui::live() && rl::is_mouse_button_released(rl::RLMouseButton.LEFT)) enter = visible[i];
+		if (entry.dir && pressed_entry == visible[vi] && !dragging && hovered && ui::live() && rl::is_mouse_button_released(rl::RLMouseButton.LEFT)) enter = visible[vi];
 	}
-	if (!visible_count) ui::text("Empty folder", list.x + 16, list.y + 16, 15, ui::GRAY);
+	if (!visible_count) ui::text("Empty folder", list.x + 16, list.y + (float)parent_rows * ROW + 16, 15, ui::GRAY);
 	ui::end_clip();
 	ui::scrollbar(list, scroll, content);
 	// Navigate after drawing: do not mutate the entry array during iteration.
-	if (enter >= 0) go(txt::join(txt::view(&directory), txt::view(&entries[enter].name)));
+	if (go_up) { go(txt::dirname(txt::view(&directory))); }
+	else if (enter >= 0) { go(txt::join(txt::view(&directory), txt::view(&entries[enter].name))); }
 	ui::panel({ 0, h - 28, w, 28 }, ui::BG_HARD);
 	ui::text(txt::view(&status), 16, h - 21, 13, ui::GRAY);
 	finish_drag(h);

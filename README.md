@@ -11,7 +11,7 @@ c3c build
 
 Click a folder to enter it (opens on mouse release, so you can drag it instead). Files are listed and selectable; launching files and file operations are intentionally not implemented yet. Hidden files are hidden by default; Ctrl+H toggles them using the cached listing (no filesystem rescan). Folders sort first, then names case-insensitively.
 
-- **Up / Backspace:** parent folder
+- **../ row / Up / Backspace:** parent folder (`../` appears first in the list, except at filesystem root)
 - **Home button:** home folder
 - **Ctrl+L:** edit the path; Enter navigates (relative paths use the displayed folder)
 - **Ctrl+H:** show/hide hidden files (hidden on first launch; remembered thereafter)
