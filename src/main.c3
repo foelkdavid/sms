@@ -10,6 +10,9 @@ char[4096] directory;
 char[4096] path_edit;
 sys::Entry[MAX_ENTRIES] entries;
 int entry_count;
+int[MAX_ENTRIES] visible;
+int visible_count;
+bool show_hidden;
 int selected = -1;
 float scroll;
 char[128] status;
@@ -27,7 +30,7 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Click a folder to enter it.\nCtrl+L: edit path; Backspace: parent; F5: refresh.");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Click a folder to enter it.\nCtrl+L: edit path; Ctrl+H: toggle hidden files; Backspace: parent; F5: refresh.");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
@@ -59,10 +62,23 @@ fn bool navigate(String path) => @pool()
 	entry_count = n;
 	txt::set(&directory, txt::view(&resolved));
 	txt::set(&path_edit, txt::view(&directory));
-	txt::set(&status, string::tformat(n == MAX_ENTRIES ? "%d items (display limit reached)" : "%d items", n));
+	refilter();
+	return true;
+}
+
+// Toggle against the cached listing: no disk I/O or sorting needed.
+fn void refilter() => @pool()
+{
+	visible_count = 0;
+	for (int i = 0; i < entry_count; i++)
+	{
+		if (show_hidden || entries[i].name[0] != '.') visible[visible_count++] = i;
+	}
+	txt::set(&status, string::tformat("%d items%s%s", visible_count,
+		show_hidden ? " · hidden shown" : "",
+		entry_count == MAX_ENTRIES ? " (display limit reached)" : ""));
 	selected = -1;
 	scroll = 0;
-	return true;
 }
 
 fn void go(String path)
@@ -79,6 +95,11 @@ fn void frame() => @pool()
 	if (ui::top == 0 && ui::ctrl_down() && ui::letter('l')) ui::focus_on(ID_PATH, &path_edit);
 	if (ui::top == 0 && ui::focus < 0)
 	{
+		if (ui::ctrl_down() && ui::letter('h'))
+		{
+			show_hidden = !show_hidden;
+			refilter();
+		}
 		if (rl::is_key_pressed(rl::RLKeyboardKey.BACKSPACE)) go(txt::dirname(txt::view(&directory)));
 		if (rl::is_key_pressed(rl::RLKeyboardKey.F5)) go(txt::view(&directory));
 	}
@@ -92,29 +113,30 @@ fn void frame() => @pool()
 	ui::hline(0, 59, w);
 
 	Rect list = { 8, 68, w - 16, h - 104 };
-	float content = (float)entry_count * ROW;
+	float content = (float)visible_count * ROW;
 	scroll = ui::scroll_wheel(list, scroll, content);
 	ui::begin_clip(list);
 	// Virtualized list: visit only the rows that can actually be seen.
 	int first = math::max(0, (int)(scroll / ROW));
-	int end = math::min(entry_count, first + (int)(list.height / ROW) + 2);
+	int end = math::min(visible_count, first + (int)(list.height / ROW) + 2);
 	int enter = -1;
 	for (int i = first; i < end; i++)
 	{
 		Rect row = { list.x, list.y + (float)i * ROW - scroll, list.width - 10, ROW };
+		sys::Entry* entry = &entries[visible[i]];
 		bool hovered = ui::hover(row);
 		if (selected == i) { ui::panel(row, ui::BG2, 4); }
 		else if (hovered) { ui::panel(row, ui::BG1, 4); }
-		ui::text(entries[i].dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12, row.y + 7, 17, entries[i].dir ? ui::YELLOW : ui::GRAY);
-		ui::text_fit(txt::view(&entries[i].name), row.x + 42, row.y + 8, row.width - 54, 15, ui::FG);
+		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12, row.y + 7, 17, entry.dir ? ui::YELLOW : ui::GRAY);
+		ui::text_fit(txt::view(&entry.name), row.x + 42, row.y + 8, row.width - 54, 15, ui::FG);
 		if (ui::clicked(row))
 		{
 			selected = i;
 			ui::unfocus();
-			if (entries[i].dir) enter = i;
+			if (entry.dir) enter = visible[i];
 		}
 	}
-	if (!entry_count) ui::text("Empty folder", list.x + 16, list.y + 16, 15, ui::GRAY);
+	if (!visible_count) ui::text("Empty folder", list.x + 16, list.y + 16, 15, ui::GRAY);
 	ui::end_clip();
 	ui::scrollbar(list, scroll, content);
 	// Navigate after drawing: do not mutate the entry array during iteration.

@@ -9,11 +9,12 @@ c3c build
 ./build/sms -d /tmp
 ```
 
-Click a folder to enter it. Files are listed and selectable; launching files and file operations are intentionally not implemented yet. Hidden files are shown. Folders sort first, then names case-insensitively.
+Click a folder to enter it. Files are listed and selectable; launching files and file operations are intentionally not implemented yet. Hidden files are hidden by default; Ctrl+H toggles them using the cached listing (no filesystem rescan). Folders sort first, then names case-insensitively.
 
 - **Up / Backspace:** parent folder
 - **Home button:** home folder
 - **Ctrl+L:** edit the path; Enter navigates (relative paths use the displayed folder)
+- **Ctrl+H:** show/hide hidden files (retained while browsing; resets to hidden on startup)
 - **Refresh / F5:** reload the listing
 - **Ctrl +/-/0:** UI zoom
 
