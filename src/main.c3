@@ -6,7 +6,9 @@ import sms::prefs;
 
 const int ID_PATH = 1;
 const int MAX_ENTRIES = 16384;
-const float ROW = 42;
+const float ROW = 54;
+const float FILE_ICON = 32;
+const float FILE_TEXT = 20;
 const float SIDE_W = 184;
 const float SIDE_ROW = 40;
 char[4096] directory;
@@ -258,8 +260,8 @@ fn void frame() => @pool()
 		if (parent_rows && i == 0)
 		{
 			if (hovered) ui::panel(row, ui::BG1, 4);
-			ui::text(ui::I_UP, row.x + 12, row.y + 8, 25, ui::YELLOW);
-			ui::text("../", row.x + 50, row.y + 13, 17, ui::FG);
+			ui::text(ui::I_UP, row.x + 12, row.y + (ROW - FILE_ICON) / 2, FILE_ICON, ui::YELLOW);
+			ui::text("../", row.x + 60, row.y + (ROW - FILE_TEXT) / 2, FILE_TEXT, ui::FG);
 			if (ui::clicked(row)) go_up = true;
 			continue;
 		}
@@ -267,8 +269,8 @@ fn void frame() => @pool()
 		sys::Entry* entry = &entries[visible[vi]];
 		if (selected == vi) { ui::panel(row, ui::BG2, 4); }
 		else if (hovered) { ui::panel(row, ui::BG1, 4); }
-		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12, row.y + 8, 25, entry.dir ? ui::YELLOW : ui::GRAY);
-		ui::text_fit(txt::view(&entry.name), row.x + 50, row.y + 13, row.width - 62, 17, ui::FG);
+		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12, row.y + (ROW - FILE_ICON) / 2, FILE_ICON, entry.dir ? ui::YELLOW : ui::GRAY);
+		ui::text_fit(txt::view(&entry.name), row.x + 60, row.y + (ROW - FILE_TEXT) / 2, row.width - 72, FILE_TEXT, ui::FG);
 		if (ui::clicked(row))
 		{
 			selected = vi;
