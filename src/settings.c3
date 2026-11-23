@@ -17,12 +17,14 @@ struct Shortcut
 	String action;
 	bool heading;
 }
-Shortcut[42] shortcuts = {
+Shortcut[44] shortcuts = {
 	{ "NAVIGATION", "", true },
 	{ "Up / Down", "Move selection (hold to repeat)", false },
 	{ "Enter", "Open selected folder, or open selected files", false },
 	{ "Backspace / -", "Go to parent folder", false },
 	{ "Ctrl + L", "Edit folder path; Enter to go", false },
+	{ "Tab in path bar", "Complete folder (common part, then the highlighted one)", false },
+	{ "Up / Down in path bar", "Choose a suggested folder", false },
 	{ "F5", "Refresh current folder", false },
 	{ "SELECTION", "", true },
 	{ "Ctrl + click", "Add / remove one item", false },

@@ -2,7 +2,7 @@ module sms;
 import std::math, std::core::string, std::io, libc;
 import raylib6::rl;
 import bmu::ui, bmu::txt, bmu::sys, bmu::fileop, bmu::find;
-import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops;
+import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops, sms::complete;
 
 const int ID_PATH = 1;
 const int ID_SEARCH = 2;
@@ -50,6 +50,7 @@ bool[MAX_ENTRIES] cut_entry; // By entry index; dimmed while their cut is on the
 bool any_cut;
 char[4096] trash_files; // $XDG_DATA_HOME/Trash/files, resolved once at startup.
 bool drop_trash; // The current drag is over the sidebar's Trash row; reset every frame.
+Rect path_field; // the path bar, for drawing its completions on top of everything
 // What the pointer is over this frame, for drops from other apps (set while drawing; no copies).
 String hover_place; // sidebar place path (stable storage) or ""
 bool hover_place_trash;
@@ -1096,8 +1097,32 @@ fn void frame() => @pool()
 	}
 	else
 	{
-		ui::input(ID_PATH, { 100, 12, w - 192, 36 }, &path_edit, "Folder path", &submitted, ui::I_FOLDER);
-		if (submitted) go(txt::view(&path_edit));
+		// Folder completions: mouse first (a click must not reach the list below), then the field, then keys.
+		path_field = { 100, 12, w - 192, 36 };
+		bool editing = ui::focused(ID_PATH);
+		if (editing) complete::mouse(path_field, &path_edit);
+		if (editing && complete::open) ui::input_arrows_free = true;
+		ui::input(ID_PATH, path_field, &path_edit, "Folder path", &submitted, ui::I_FOLDER);
+		if (ui::focused(ID_PATH))
+		{
+			if (complete::open)
+			{
+				if (ui::repeat(rl::RLKeyboardKey.DOWN)) complete::move(1);
+				if (ui::repeat(rl::RLKeyboardKey.UP)) complete::move(-1);
+				if (rl::is_key_pressed(rl::RLKeyboardKey.TAB)) complete::tab(&path_edit);
+				if (submitted && complete::sel >= 0) ui::input_replace(&path_edit, complete::suggestion(complete::sel));
+			}
+			if (!submitted) complete::update(txt::view(&path_edit), txt::view(&directory));
+		}
+		else
+		{
+			complete::close();
+		}
+		if (submitted)
+		{
+			complete::close();
+			go(txt::view(&path_edit));
+		}
 	}
 	if (ui::icon_button({ w - 84, 12, 32, 36 }, searching ? ui::I_TIMES : ui::I_SEARCH, ui::FG4, searching ? "Clear search (Escape)" : "Search this folder (Ctrl+F)"))
 	{
@@ -1337,6 +1362,7 @@ fn void frame() => @pool()
 	}
 	finish_drag(h);
 	if (rl::is_mouse_button_released(rl::RLMouseButton.LEFT) || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { pressed_row = -1; collapse_row = -1; }
+	if (!searching && ui::focused(ID_PATH)) complete::draw(path_field);
 	settings::draw();
 	ops::draw_dialogs();
 	ui::frame_end();
