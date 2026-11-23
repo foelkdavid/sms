@@ -1028,6 +1028,9 @@ fn void frame() => @pool()
 		if (ui::ctrl_down() && ui::letter('l'))
 		{
 			if (searching) close_search();
+			// Trailing slash: the completions show the current folder's subfolders right away.
+			String here = txt::view(&directory);
+			if (here != "/") { txt::set(&path_edit, here); txt::append(&path_edit, "/"); }
 			ui::focus_on(ID_PATH, &path_edit);
 		}
 		if (ui::ctrl_down() && ui::letter('f')) start_search(ui::shift_down());
@@ -1083,7 +1086,8 @@ fn void frame() => @pool()
 	bool submitted;
 	if (searching)
 	{
-		bool tabbed = ui::focused(ID_SEARCH) && rl::is_key_pressed(rl::RLKeyboardKey.TAB);
+		// Tab, Enter or Down leave the search box for the first result.
+		bool tabbed = ui::focused(ID_SEARCH) && (rl::is_key_pressed(rl::RLKeyboardKey.TAB) || rl::is_key_pressed(rl::RLKeyboardKey.DOWN));
 		if (ui::input(ID_SEARCH, { 100, 12, w - 192, 36 }, &search, deep ? "Search all subfolders" : "Search this folder", &submitted, ui::I_SEARCH))
 		{
 			if (deep) { deep_due = ui::now + 0.15; deep_shown = -1; deep_pick = false; }

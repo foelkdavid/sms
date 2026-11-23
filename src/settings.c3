@@ -45,7 +45,7 @@ Shortcut[44] shortcuts = {
 	{ "SEARCH & VIEW", "", true },
 	{ "Ctrl + F", "Search this folder", false },
 	{ "Ctrl + Shift + F", "Search all subfolders (full path below)", false },
-	{ "Enter / Tab in search", "Keep results, select the first one", false },
+	{ "Enter / Tab / Down in search", "Keep results, select the first one", false },
 	{ "Ctrl + H", "Show / hide hidden files", false },
 	{ "Ctrl + S", "Show / hide sidebar", false },
 	{ "Escape", "Clear search, cancel drag, close settings", false },
