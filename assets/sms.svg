@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="#282828"/>
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="none" stroke="#504945" stroke-width="4"/>
+  <!-- folder (back flap, front) and a magnifier: "show my stuff" -->
+  <path d="M22 38a8 8 0 0 1 8-8h20l10 10h38a8 8 0 0 1 8 8v40a8 8 0 0 1-8 8H30a8 8 0 0 1-8-8z" fill="#d79921"/>
+  <path d="M22 54h84v34a8 8 0 0 1-8 8H30a8 8 0 0 1-8-8z" fill="#fabd2f"/>
+  <circle cx="86" cy="78" r="13" fill="none" stroke="#282828" stroke-width="6"/>
+  <path d="M95.5 87.5l9 9" stroke="#282828" stroke-width="7" stroke-linecap="round"/>
+</svg>

@@ -64,7 +64,7 @@ c3c build install --trust=full
 c3c build uninstall --trust=full
 ```
 
-Install builds sms first, then copies it to `~/.local/bin/sms`, generates a desktop launcher from `sms.desktop` under `$XDG_DATA_HOME/applications` (default `~/.local/share/applications`), and copies the license notices to `$XDG_DATA_HOME/sms/licenses`. The launcher opens your home folder and does not depend on the checkout. Add `~/.local/bin` to `PATH` for terminal use. No sudo is needed; `--trust=full` allows C3 to run the installation script.
+Install builds sms first, then copies it to `~/.local/bin/sms`, generates a desktop launcher from `sms.desktop` under `$XDG_DATA_HOME/applications` (default `~/.local/share/applications`), installs the icon `assets/sms.svg` to `$XDG_DATA_HOME/icons/hicolor/scalable/apps/`, and copies the license notices to `$XDG_DATA_HOME/sms/licenses`. The launcher opens your home folder and does not depend on the checkout. Add `~/.local/bin` to `PATH` for terminal use. No sudo is needed; `--trust=full` allows C3 to run the installation script.
 
 Uninstall removes those installed files, without building the app or deleting settings and saved locations.
 

@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -21,6 +22,18 @@ def exec_arg(value):
     return desktop_string('"' + value + '"')
 
 
+def refresh_icons(data):
+    # Refresh an existing GTK icon cache (a stale one hides the new icon); never create one. Tools are optional.
+    cmds = [["update-desktop-database", str(data / "applications")]]
+    if (data / "icons/hicolor/icon-theme.cache").exists():
+        cmds.append(["gtk-update-icon-cache", "-q", "-t", str(data / "icons/hicolor")])
+    for cmd in cmds:
+        try:
+            subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            pass
+
+
 def main():
     if sys.argv[1:] not in (["install"], ["uninstall"]):
         raise SystemExit("usage: install.py install|uninstall")
@@ -30,16 +43,18 @@ def main():
         raise SystemExit("XDG_DATA_HOME must be absolute")
     binary = home / ".local/bin/sms"
     desktop = data / "applications/sms.desktop"
+    icon = data / "icons/hicolor/scalable/apps/sms.svg"
     licenses = data / "sms/licenses"
     notices = ("FONT-OFL.txt", "RAYLIB-LICENSE.txt")
     if sys.argv[1] == "uninstall":
-        for path in (binary, desktop, *(licenses / name for name in notices)):
+        for path in (binary, desktop, icon, *(licenses / name for name in notices)):
             path.unlink(missing_ok=True)
         for directory in (licenses, licenses.parent):
             try:
                 directory.rmdir()
             except OSError:
                 pass  # Preserve any unrelated files.
+        refresh_icons(data)
         print("Uninstalled sms (settings preserved).")
         return
     binary.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +76,11 @@ def main():
     template = (ROOT / "sms.desktop").read_text()
     desktop.write_text(template.replace("@EXEC@", exec_arg(binary) + " --dir " + exec_arg(home)))
     desktop.chmod(0o644)
-    print(f"Installed {binary} and {desktop}")
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / "assets/sms.svg", icon)
+    icon.chmod(0o644)
+    refresh_icons(data)
+    print(f"Installed {binary}, {desktop} and {icon}")
     print("Ensure ~/.local/bin is on PATH to run sms from a terminal.")
 
 
