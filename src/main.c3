@@ -51,6 +51,8 @@ bool any_cut;
 char[4096] trash_files; // $XDG_DATA_HOME/Trash/files, resolved once at startup.
 bool drop_trash; // The current drag is over the sidebar's Trash row; reset every frame.
 Rect path_field; // the path bar, for drawing its completions on top of everything
+const int MENU_FILE = 1;
+int menu_entry = -1; // entry the file context menu is for
 // What the pointer is over this frame, for drops from other apps (set while drawing; no copies).
 String hover_place; // sidebar place path (stable storage) or ""
 bool hover_place_trash;
@@ -235,6 +237,7 @@ fn void refilter() => @pool()
 	anchor = -1;
 	collapse_row = -1;
 	list_gen++;
+	menu_entry = -1; // the listing changed: the file menu must not act on another entry
 	visible_count = 0;
 	for (int i = 0; i < entry_count; i++)
 	{
@@ -783,6 +786,17 @@ fn void poll_selection_size() => @pool()
 	compose_detail();
 }
 
+<* Right-click menu for a file: Open (its opener) or Open as sudo (same command as root, asks for the password). *>
+fn void file_menu() => @pool()
+{
+	if (!ui::menu_begin(MENU_FILE, 230)) return;
+	bool valid = menu_entry >= 0 && menu_entry < entry_count;
+	String path = valid ? txt::join(txt::view(&directory), txt::view(&entries[menu_entry].name)) : "";
+	if (ui::menu_item("Open", ui::I_EXTERNAL, "Enter", valid)) openers::launch(path);
+	if (ui::menu_item("Open as sudo", ui::I_LOCK, "", valid)) ops::ask_open_as_sudo(path);
+	ui::menu_end();
+}
+
 <* "deleted from ~/Docs on 2026-11-23 14:02" for a trash entry; reads its .trashinfo only when the hovered entry changes. *>
 fn String trash_origin(int entry) => @pool()
 {
@@ -1270,6 +1284,13 @@ fn void frame() => @pool()
 			else if (hovered) { ui::panel(row, ui::BG1, 4); }
 			if (selected == vi && (marked_count > 1 || !marked[vi])) ui::outline(row, ui::BG4, 4);
 			if (hovered && entry.dir) hover_dir_entry = visible[vi];
+			// Right-click on a file: select it (keep a selection it belongs to) and offer Open / Open as sudo.
+			if (!entry.dir && ui::right_clicked(row))
+			{
+				if (!marked[vi]) select_only(vi);
+				menu_entry = visible[vi];
+				ui::menu_open(MENU_FILE);
+			}
 			bool drop_here = dragging && hovered && entry.dir && !marked[vi];
 			if (drop_here)
 			{
@@ -1370,6 +1391,7 @@ fn void frame() => @pool()
 	finish_drag(h);
 	if (rl::is_mouse_button_released(rl::RLMouseButton.LEFT) || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { pressed_row = -1; collapse_row = -1; }
 	if (!searching && ui::focused(ID_PATH)) complete::draw(path_field);
+	file_menu();
 	settings::draw();
 	ops::draw_dialogs();
 	ui::frame_end();

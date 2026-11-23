@@ -2,7 +2,7 @@ module sms::ops;
 import std::math, std::core::string, libc;
 import raylib6::rl;
 import bmu::ui, bmu::txt, bmu::fileop;
-import sms::prefs;
+import sms::prefs, sms::openers;
 
 // File operations: clipboard (Ctrl+C / Ctrl+X / Ctrl+V), drag moves, Del / Shift+Del, one background
 // bmu::fileop job with a docked progress bar, conflict / delete / quit dialogs. All disk work runs on the
@@ -93,6 +93,9 @@ char[4096] req_dst;
 bool req_fallback;
 bool req_elevated;
 bool admin_open;
+bool admin_for_open;           // the dialog asks for "Open as sudo" (not a retry of a file operation)
+char[4096] sudo_path;          // file to open as sudo
+fileop::SudoRun[4] sudo_runs;  // programs started as root (each drained/reaped by its own thread)
 bool admin_delete;             // TRASH failed: the retry deletes permanently as root (root's trash is not yours)
 char[256] admin_pw;            // wiped on submit / cancel / close
 char[512] admin_error;
@@ -254,6 +257,7 @@ fn void remove(String dir, String[] names, bool permanent) => @pool()
 <* Once per frame, before input: progress snapshot, finish handling, close guard. *>
 fn void poll() => @pool()
 {
+	poll_sudo();
 	fileop::Progress done;
 	if (job.finished(&done))
 	{
@@ -297,6 +301,7 @@ fn void finished(fileop::Progress* p) => @pool()
 			if ((denied && !req_elevated && job_kind != RESTORE && job_kind != COUNT) || wrong_pw)
 			{
 				admin_delete = req_kind == TRASH || req_kind == DELETE;
+				admin_for_open = false;
 				if (!wrong_pw) { txt::set(&admin_error, txt::empty(&p.error) ? "Permission denied" : txt::view(&p.error)); }
 				else { txt::set(&admin_error, "Wrong password. Try again."); }
 				ui::wipe(&admin_pw);
@@ -305,6 +310,66 @@ fn void finished(fileop::Progress* p) => @pool()
 				return;
 			}
 			ui::toast(txt::empty(&p.error) ? "The file operation failed" : txt::view(&p.error), ui::RED);
+	}
+}
+
+<* Right-click → Open as sudo: ask for the password, then run the file's opener command as root. *>
+fn void ask_open_as_sudo(String path) => @pool()
+{
+	char[1024] storage;
+	ZString[openers::MAX_COMMAND_ARGS] cmd;
+	int n = openers::command_for(txt::basename(path), &storage, &cmd);
+	if (n == -1) { ui::toast("No matching file opener. Configure one with Ctrl+K.", ui::RED); return; }
+	if (n < 0) { ui::toast("This opener's command is empty or has an unclosed quote", ui::RED); return; }
+	txt::set(&sudo_path, path);
+	String shown;
+	for (int i = 0; i < n; i++) shown = i ? string::tformat("%s %s", shown, cmd[i].str_view()) : cmd[i].str_view().tcopy();
+	txt::set(&admin_error, string::tformat("%s with %s", txt::basename(path), shown));
+	admin_for_open = true;
+	admin_delete = false;
+	ui::wipe(&admin_pw);
+	admin_open = true;
+	ui::focus = ID_ADMIN_PW;
+}
+
+fn void open_as_sudo() => @pool()
+{
+	String path = txt::view(&sudo_path);
+	char[1024] storage;
+	ZString[openers::MAX_COMMAND_ARGS] cmd;
+	int n = openers::command_for(txt::basename(path), &storage, &cmd);
+	if (n < 0) { ui::wipe(&admin_pw); return; }
+	String[] argv = mem::talloc_array(String, (usz)n + 1);
+	for (int i = 0; i < n; i++) argv[i] = cmd[i].str_view();
+	argv[n] = path;
+	fileop::SudoRun* free_run;
+	foreach (&r : sudo_runs) if (!r.started) { free_run = r; break; }
+	if (!free_run) { ui::toast("Too many programs running as sudo", ui::RED); }
+	else if (!free_run.start(argv, &admin_pw)) { ui::toast("Could not start sudo", ui::RED); }
+	ui::wipe(&admin_pw);
+}
+
+<* Once per frame: a lock + copy per running sudo program; a wrong password asks again. *>
+fn void poll_sudo()
+{
+	foreach (&r : sudo_runs)
+	{
+		if (!r.started) continue;
+		fileop::SudoState st = r.poll();
+		if (st != FAILED) continue;
+		if (txt::view(&r.error) == "Wrong password" && !admin_open)
+		{
+			txt::set(&admin_error, "Wrong password. Try again.");
+			admin_for_open = true;
+			admin_delete = false;
+			ui::wipe(&admin_pw);
+			admin_open = true;
+			ui::focus = ID_ADMIN_PW;
+		}
+		else
+		{
+			ui::toast(txt::view(&r.error), ui::RED);
+		}
 	}
 }
 
@@ -484,22 +549,25 @@ fn void draw_dialogs() => @pool()
 	else if (admin_open)
 	{
 		Rect box = ui::dialog(560, 264);
-		bool cancel = ui::dialog_header(box, ui::I_LOCK, "Permission denied") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
+		bool cancel = ui::dialog_header(box, ui::I_LOCK, admin_for_open ? "Open as sudo" : "Permission denied") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
 		ui::text_fit(txt::view(&admin_error), box.x + 20, box.y + 60, box.width - 40, 14, ui::FG4);
 		if (admin_delete) ui::text_fit("Root can't use your trash: this deletes permanently.", box.x + 20, box.y + 86, box.width - 40, 14, ui::FG);
 		bool submitted;
 		ui::secret_input(ID_ADMIN_PW, { box.x + 20, box.y + 118, box.width - 40, 40 }, &admin_pw, "Password for sudo", &submitted);
 		if (ui::button({ box.x + 20, box.y + 196, 200, 40 }, "Cancel")) cancel = true;
-		bool go = ui::button({ box.x + box.width - 260, box.y + 196, 240, 40 }, admin_delete ? "Delete as sudo" : "Retry as sudo", admin_delete ? DANGER : PRIMARY) || submitted;
+		bool go = ui::button({ box.x + box.width - 260, box.y + 196, 240, 40 }, admin_delete ? "Delete as sudo" : admin_for_open ? "Open as sudo" : "Retry as sudo", admin_delete ? DANGER : PRIMARY) || submitted;
 		if (go)
 		{
 			admin_open = false;
 			ui::unfocus();
-			retry_as_admin();
+			if (admin_for_open) { open_as_sudo(); }
+			else { retry_as_admin(); }
+			admin_for_open = false;
 		}
 		else if (cancel)
 		{
 			admin_open = false;
+			admin_for_open = false;
 			ui::wipe(&admin_pw);
 			ui::unfocus();
 		}

@@ -58,6 +58,15 @@ fn int split_command(String cmd, char[] storage, ZString[] out)
 	return n ? n : -1;
 }
 
+<* The split command of the first rule matching `name` (files not added): token count, -1 = no rule, -2 = bad command. *>
+fn int command_for(String name, char[] storage, ZString[] out)
+{
+	int rule = rule_for(name);
+	if (rule < 0) return -1;
+	int n = split_command(txt::view(&rules[rule].executable), storage, out);
+	return n < 0 ? -2 : n;
+}
+
 fn bool valid(String pattern, String executable)
 {
 	if (!pattern.len || !executable.len || pattern.len >= 256 || executable.len >= 1024) return false;
