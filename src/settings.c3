@@ -175,7 +175,7 @@ fn void draw()
 	{
 		bool compact = box.height < 360;
 		float bottom = box.y + box.height - (compact ? 70 : 94);
-		if (!compact) ui::text_fit("Group patterns with commas. First matching rule wins. Executable only.", x, area.y, width, 14, ui::FG4);
+		if (!compact) ui::text_fit("Group patterns with commas. First match wins. Command + arguments, no shell; the file goes last.", x, area.y, width, 14, ui::FG4);
 		float pattern_w = (width - 66) * 0.48f;
 		float executable_x = x + pattern_w + 12;
 		float executable_w = width - pattern_w - 62;
@@ -194,7 +194,7 @@ fn void draw()
 		{
 			float row_y = area.y + (float)i * RULE_ROW - rules_scroll;
 			ui::input(100 + i * 2, { x, row_y, pattern_w, 36 }, &openers::rules[i].pattern, "*.png,*.jpg,*.jpeg");
-			ui::input(101 + i * 2, { executable_x, row_y, executable_w, 36 }, &openers::rules[i].executable, "firefox-esr");
+			ui::input(101 + i * 2, { executable_x, row_y, executable_w, 36 }, &openers::rules[i].executable, "alacritty -e vim");
 			if (ui::icon_button({ x + width - 44, row_y, 32, 32 }, ui::I_TIMES, ui::GRAY, "Remove rule")) remove = i;
 		}
 		ui::end_clip();

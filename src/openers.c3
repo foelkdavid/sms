@@ -20,11 +20,52 @@ extern fn CInt fnmatch(ZString pattern, ZString name, CInt flags) @cname("fnmatc
 
 fn String config_path() => txt::join(txt::view(&prefs::config_dir), "openers");
 
+const int MAX_COMMAND_ARGS = 32;
+
+<*
+ Split an opener command ("alacritty -e vim") into program + arguments without a shell: whitespace separates,
+ "..." and '...' group (no expansion of any kind), backslash escapes the next character outside single quotes.
+ Tokens are written NUL-terminated into `storage`; returns the token count, or -1 (unterminated quote, too many
+ tokens, storage full, empty).
+*>
+fn int split_command(String cmd, char[] storage, ZString[] out)
+{
+	int n;
+	usz k;
+	usz i;
+	while (true)
+	{
+		while (i < cmd.len && (cmd[i] == ' ' || cmd[i] == '\t')) i++;
+		if (i >= cmd.len) break;
+		if (n >= out.len) return -1;
+		out[n++] = (ZString)&storage[k];
+		char quote = 0;
+		while (i < cmd.len)
+		{
+			char c = cmd[i];
+			if (!quote && (c == ' ' || c == '\t')) break;
+			i++;
+			if (quote && c == quote) { quote = 0; continue; }
+			if (!quote && (c == '"' || c == '\'')) { quote = c; continue; }
+			if (c == '\\' && quote != '\'' && i < cmd.len) c = cmd[i++];
+			if (k + 1 >= storage.len) return -1;
+			storage[k++] = c;
+		}
+		if (quote) return -1;
+		if (k + 1 >= storage.len) return -1;
+		storage[k++] = 0;
+	}
+	return n ? n : -1;
+}
+
 fn bool valid(String pattern, String executable)
 {
 	if (!pattern.len || !executable.len || pattern.len >= 256 || executable.len >= 1024) return false;
 	foreach (ch : pattern) if (ch == '|' || ch == '\n' || ch == '\r' || ch == 0) return false;
 	foreach (ch : executable) if (ch == '|' || ch == '\n' || ch == '\r' || ch == 0) return false;
+	char[1024] storage;
+	ZString[MAX_COMMAND_ARGS] tokens;
+	if (split_command(executable, &storage, &tokens) < 0) return false;
 	usz start;
 	for (usz i = 0; i <= pattern.len; i++)
 	{
@@ -146,12 +187,15 @@ fn bool spawn(int rule, ZString[] files) => @pool()
 	int slot = -1;
 	for (int i = 0; i < children.len; i++) if (!children[i]) { slot = i; break; }
 	if (slot < 0) { ui::toast("All 16 opener process slots are busy", ui::RED); return false; }
-	String exe = txt::view(&rules[rule].executable).trim();
-	if (!exe.len) { ui::toast("This opener has no executable", ui::RED); return false; }
-	ZString[] argv = mem::talloc_array(ZString, files.len + 2);
-	argv[0] = exe.zstr_tcopy();
-	foreach (i, f : files) argv[i + 1] = f;
-	argv[files.len + 1] = null;
+	// Program and its arguments from the rule (no shell); the files follow as literal arguments.
+	char[1024] storage;
+	ZString[MAX_COMMAND_ARGS] command;
+	int argc = split_command(txt::view(&rules[rule].executable), &storage, &command);
+	if (argc < 0) { ui::toast("This opener's command is empty or has an unclosed quote", ui::RED); return false; }
+	ZString[] argv = mem::talloc_array(ZString, (usz)argc + files.len + 1);
+	for (int i = 0; i < argc; i++) argv[i] = command[i];
+	foreach (usz i, f : files) argv[(usz)argc + i] = f;
+	argv[(usz)argc + files.len] = null;
 	int pid = sys::c_fork();
 	if (pid < 0) { ui::toast("Could not launch file opener", ui::RED); return false; }
 	if (pid == 0)

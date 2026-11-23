@@ -82,5 +82,34 @@ fn void main(String[] args) => @pool()
 	assert(!openers::save());
 	openers::load();
 	assert(txt::view(&openers::rules[0].executable) == "/bin/true");
+	// Commands with arguments, split without a shell.
+	char[1024] storage;
+	ZString[openers::MAX_COMMAND_ARGS] tok;
+	assert(openers::split_command("alacritty -e vim", &storage, &tok) == 3);
+	assert(tok[0].str_view() == "alacritty" && tok[1].str_view() == "-e" && tok[2].str_view() == "vim");
+	assert(openers::split_command("  sh  -c 'echo \"$1\" | x'  a\\ b ", &storage, &tok) == 4);
+	assert(tok[2].str_view() == "echo \"$1\" | x" && tok[3].str_view() == "a b");
+	assert(openers::split_command("say \"hi there\"", &storage, &tok) == 2 && tok[1].str_view() == "hi there");
+	assert(openers::split_command("vim 'unclosed", &storage, &tok) == -1);
+	assert(openers::split_command("   ", &storage, &tok) == -1);
+	assert(!openers::valid("*.conf", "alacritty -e 'vim"));
+	assert(openers::valid("*.conf", "alacritty -e vim"));
+	// End to end: the file name stays one literal argument after the command's own arguments.
+	String dir = args[1];
+	String weird = txt::join(dir, "a space;$(touch BAD).pdf");
+	assert(sys::write_file(weird, "x"));
+	openers::count = 1;
+	txt::set(&openers::rules[0].pattern, "*.pdf");
+	txt::set(&openers::rules[0].executable, "/bin/sh -c 'touch \"$1.opened\"' opener");
+	assert(openers::launch(weird));
+	bool done;
+	for (int i = 0; i < 200 && !done; i++)
+	{
+		openers::poll();
+		done = sys::exists(txt::join(dir, "a space;$(touch BAD).pdf.opened"));
+		sys::c_usleep(10000);
+	}
+	assert(done);
+	assert(!sys::exists("BAD") && !sys::exists(txt::join(dir, "BAD")));
 	io::printn("Headless opener checks passed.");
 }
