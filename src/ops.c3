@@ -72,6 +72,13 @@ fn void Names.free(&self)
 }
 
 fileop::Job job;
+fileop::Job counter;           // COUNT for the permanent-delete question (independent of `job`)
+fileop::Progress counted;
+bool counting;
+char[96] count_text;
+int count_shown = -1;
+ulong count_bytes_shown;
+fileop::State count_state_shown;
 fileop::Progress cur;          // snapshot of this frame
 Names clip;
 bool clip_cut;
@@ -109,6 +116,7 @@ fn bool take_refresh()
 fn void close()
 {
 	job.close();
+	counter.close();
 	clip.free();
 	pending.free();
 }
@@ -153,6 +161,7 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 		case MOVE: txt::set(&title, string::tformat("Moving %s to %s", what, txt::view(&job_target)));
 		case TRASH: txt::set(&title, string::tformat("Moving %s to the trash", what));
 		case DELETE: txt::set(&title, string::tformat("Deleting %s", what));
+		case COUNT: txt::set(&title, string::tformat("Counting %s", what));
 	}
 	txt::set(&detail, "Preparing…");
 	job.status(&cur);
@@ -201,6 +210,12 @@ fn void remove(String dir, String[] names, bool permanent) => @pool()
 	}
 	if (!pending.set(dir, names)) { ui::toast("Too many items", ui::RED); return; }
 	confirm_open = true;
+	// Count in the background: the dialog opens at once and fills in "N items, X GB" as the scan runs.
+	counter.close();
+	counting = !pending_fallback && counter.start(COUNT, dir, names);
+	counted = {};
+	count_shown = -1;
+	txt::set(&count_text, counting ? "Counting…" : "");
 }
 
 <* Once per frame, before input: progress snapshot, finish handling, close guard. *>
@@ -236,11 +251,47 @@ fn void finished(fileop::Progress* p) => @pool()
 				case MOVE: ui::toast(string::tformat("Moved %s%s", what, skipped), ui::GREEN);
 				case TRASH: ui::toast(string::tformat("Moved %s to the trash", what), ui::GREEN);
 				case DELETE: ui::toast(string::tformat("Deleted %s", what), ui::GREEN);
+				case COUNT: break;
 			}
 		case CANCELLED:
 			ui::toast(job_kind == COPY || job_kind == MOVE ? "Cancelled: nothing was changed" : "Cancelled", ui::YELLOW);
 		default:
 			ui::toast(txt::empty(&p.error) ? "The file operation failed" : txt::view(&p.error), ui::RED);
+	}
+}
+
+fn void group_digits(char[] out, long n) => @pool()
+{
+	String raw = string::tformat("%d", n);
+	char[32] tmp;
+	usz k;
+	foreach (i, c : raw)
+	{
+		if (i > 0 && (raw.len - i) % 3 == 0) tmp[k++] = ',';
+		tmp[k++] = c;
+	}
+	txt::set(out, (String)tmp[:k]);
+}
+
+<* Poll the COUNT job; reformat the text only when the numbers changed. *>
+fn void update_count() => @pool()
+{
+	if (!counting) return;
+	if (counter.finished(&counted)) { counting = false; }
+	else { counter.status(&counted); }
+	if (counted.files_total == count_shown && counted.bytes_total == count_bytes_shown && counted.state == count_state_shown) return;
+	count_shown = counted.files_total;
+	count_bytes_shown = counted.bytes_total;
+	count_state_shown = counted.state;
+	char[32] n, size;
+	group_digits(&n, counted.files_total);
+	size_text(&size, counted.bytes_total);
+	String items = counted.files_total == 1 ? "item" : "items";
+	switch (counted.state)
+	{
+		case DONE: txt::set(&count_text, string::tformat("%s %s · %s in total", txt::view(&n), items, txt::view(&size)));
+		case FAILED: txt::set(&count_text, string::tformat("At least %s %s · %s (some unreadable)", txt::view(&n), items, txt::view(&size)));
+		default: txt::set(&count_text, string::tformat("Counting… %s %s · %s", txt::view(&n), items, txt::view(&size)));
 	}
 }
 
@@ -355,21 +406,30 @@ fn void draw_dialogs() => @pool()
 	}
 	else if (confirm_open)
 	{
-		Rect box = ui::dialog(520, 210);
+		update_count();
+		Rect box = ui::dialog(520, 232);
 		bool cancel = ui::dialog_header(box, ui::I_TRASH, "Delete permanently?") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
 		String what = pending.count == 1 ? string::tformat("\"%s\"", pending.at(0)) : string::tformat("%d items", pending.count);
 		String line = pending_fallback
 			? string::tformat("%d of %s %s on another drive and can't go to the trash.", pending_untrashable, what, pending_untrashable == 1 ? "is" : "are")
 			: string::tformat("%s will be deleted permanently.", what);
 		ui::text_fit(line, box.x + 20, box.y + 62, box.width - 40, 15, ui::FG);
-		ui::text_fit(pending_fallback ? "Delete those permanently and move the rest to the trash?" : "This cannot be undone.", box.x + 20, box.y + 90, box.width - 40, 14, ui::FG4);
-		if (ui::button({ box.x + 20, box.y + 140, 200, 40 }, "Cancel")) cancel = true;
-		if (ui::button({ box.x + box.width - 220, box.y + 140, 200, 40 }, "Delete", DANGER))
+		if (!txt::empty(&count_text)) ui::text_fit(txt::view(&count_text), box.x + 20, box.y + 88, box.width - 40, 15, ui::YELLOW);
+		ui::text_fit(pending_fallback ? "Delete those permanently and move the rest to the trash?" : "This cannot be undone.", box.x + 20, box.y + (pending_fallback ? 90 : 114), box.width - 40, 14, ui::FG4);
+		if (ui::button({ box.x + 20, box.y + 162, 200, 40 }, "Cancel")) cancel = true;
+		if (ui::button({ box.x + box.width - 220, box.y + 162, 200, 40 }, "Delete", DANGER))
 		{
 			confirm_open = false;
+			counter.close();
+			counting = false;
 			begin(pending_fallback ? TRASH : DELETE, txt::view(&pending.dir), pending.tview(), "", pending_fallback);
 		}
-		if (cancel) confirm_open = false;
+		if (cancel)
+		{
+			confirm_open = false;
+			counter.close();
+			counting = false;
+		}
 	}
 	ui::layer = 0;
 }

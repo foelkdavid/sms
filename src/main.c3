@@ -341,6 +341,14 @@ fn void resolve_trash() => @pool()
 	sys::realpath(&trash_files, txt::view(&raw).tcopy());
 }
 
+<* The shown folder is the trash or inside it: deleting there must be permanent, never trash-in-trash. *>
+fn bool in_trash()
+{
+	String dir = txt::view(&directory);
+	String t = txt::view(&trash_files);
+	return dir.starts_with(t) && (dir.len == t.len || dir[t.len] == '/');
+}
+
 <* Create the trash folders (private, per the freedesktop spec) when they are first opened. *>
 fn void ensure_trash() => @pool()
 {
@@ -445,7 +453,7 @@ fn void finish_drag(float h)
 	{
 		if (dragging && ui::top == 0)
 		{
-			if (drop_trash) { ops::remove(txt::view(&directory), marked_names(), false); }
+			if (drop_trash) { ops::remove(txt::view(&directory), marked_names(), in_trash()); }
 			else if (!txt::empty(&drop_target)) { ops::transfer(txt::view(&directory), marked_names(), txt::view(&drop_target), ui::ctrl_down()); }
 			else if (over_bar && drag_dirs) { add_marked_locations(); }
 		}
@@ -587,7 +595,7 @@ fn void frame() => @pool()
 			if (ops::has_clip()) { ops::paste(txt::view(&directory)); }
 			else { ui::toast("Nothing to paste: copy (Ctrl+C) or cut (Ctrl+X) first", ui::YELLOW); }
 		}
-		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count) ops::remove(txt::view(&directory), marked_names(), ui::shift_down() || txt::view(&directory) == txt::view(&trash_files));
+		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count) ops::remove(txt::view(&directory), marked_names(), ui::shift_down() || in_trash());
 	}
 	ui::panel({ 0, 0, w, 60 }, ui::BG_HARD);
 	if (ui::icon_button({ 12, 12, 36, 36 }, ui::I_UP, ui::FG4, "Parent folder (Backspace)")) go(txt::dirname(txt::view(&directory)));
