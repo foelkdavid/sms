@@ -1,7 +1,7 @@
 module sms;
 import std::math, std::core::string, std::io;
 import raylib6::rl;
-import bmu::ui, bmu::txt, bmu::sys;
+import bmu::ui, bmu::txt, bmu::sys, bmu::fileop;
 import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops;
 
 const int ID_PATH = 1;
@@ -37,6 +37,8 @@ int band_hi = -1;
 bool[MAX_ENTRIES] band_base;
 bool[MAX_ENTRIES] cut_entry; // By entry index; dimmed while their cut is on the clipboard.
 bool any_cut;
+char[4096] trash_files; // $XDG_DATA_HOME/Trash/files, resolved once at startup.
+bool drop_trash; // The current drag is over the sidebar's Trash row; reset every frame.
 char[64] sel_status;
 int sel_status_count = -1;
 int pressed_row = -1;
@@ -97,6 +99,7 @@ fn int main(String[] args)
 		}
 	}
 	prefs::load();
+	resolve_trash();
 	openers::load();
 	defer { if (!prefs::save()) io::eprintfn("sms: could not save settings"); }
 	if (!navigate(start)) { io::eprintfn("sms: cannot read folder: %s", start); return 1; }
@@ -305,7 +308,7 @@ fn void add_location(String path)
 }
 
 // App-specific location rows: icons and labels share the same left edge.
-fn void sidebar_location(Rect row, String path, String name, String icon)
+fn void sidebar_location(Rect row, String path, String name, String icon, bool trash = false)
 {
 	if (path == txt::view(&directory)) ui::panel(row, ui::BG2, 4);
 	if (ui::hover(row))
@@ -313,14 +316,42 @@ fn void sidebar_location(Rect row, String path, String name, String icon)
 		ui::panel(row, ui::BG1, 4);
 		if (dragging && path != txt::view(&directory))
 		{
-			txt::set(&drop_target, path);
+			// Dropping on Trash trashes (with .trashinfo); other places move/copy into the folder.
+			if (trash) { drop_trash = true; }
+			else { txt::set(&drop_target, path); }
 			ui::outline(row, ui::AQUA, 4, 2);
 		}
 		else if (!dragging) { ui::tooltip(path); }
 	}
 	ui::text(icon, row.x + 8, row.y + 8, 23, ui::YELLOW);
 	ui::text_fit(name, row.x + 40, row.y + 12, row.width - 44, 16, ui::FG);
-	if (ui::clicked(row)) go(path);
+	if (ui::clicked(row))
+	{
+		if (trash) ensure_trash();
+		go(path);
+	}
+}
+
+<* Resolved like navigate() resolves folders, so comparisons with `directory` hold behind symlinks. *>
+fn void resolve_trash() => @pool()
+{
+	char[4096] raw;
+	fileop::trash_dir(&raw);
+	txt::append(&raw, "/files");
+	sys::realpath(&trash_files, txt::view(&raw).tcopy());
+}
+
+<* Create the trash folders (private, per the freedesktop spec) when they are first opened. *>
+fn void ensure_trash() => @pool()
+{
+	String files = txt::view(&trash_files);
+	String root = txt::dirname(files);
+	if (sys::is_dir(files)) return;
+	sys::mkdirs(txt::dirname(root));
+	sys::c_mkdir(root.zstr_tcopy(), 0o700);
+	sys::c_mkdir(files.zstr_tcopy(), 0o700);
+	sys::c_mkdir(txt::join(root, "info").zstr_tcopy(), 0o700);
+	resolve_trash();
 }
 
 fn void draw_sidebar(float h)
@@ -331,8 +362,14 @@ fn void draw_sidebar(float h)
 	if (ui::icon_button({ SIDE_W - 42, 68, 30, 30 }, ui::I_PLUS, ui::FG4, "Add current folder (or drag a folder here)")) add_location(txt::view(&directory));
 	sidebar_location({ 8, 104, SIDE_W - 16, 40 }, sys::home(), "Home", ui::I_HOME);
 	sidebar_location({ 8, 144, SIDE_W - 16, 40 }, "/", "File system", ui::I_HDD);
-	ui::hline(12, 192, SIDE_W - 24);
-	Rect area = { 8, 204, SIDE_W - 16, h - 240 };
+	float extra = 0;
+	if (prefs::trash)
+	{
+		sidebar_location({ 8, 184, SIDE_W - 16, 40 }, txt::view(&trash_files), "Trash", ui::I_TRASH, true);
+		extra = 40;
+	}
+	ui::hline(12, 192 + extra, SIDE_W - 24);
+	Rect area = { 8, 204 + extra, SIDE_W - 16, h - 240 - extra };
 	float content = (float)prefs::place_count * SIDE_ROW;
 	sidebar_scroll = ui::scroll_wheel(area, sidebar_scroll, content);
 	ui::begin_clip(area);
@@ -350,7 +387,7 @@ fn void draw_sidebar(float h)
 	ui::scrollbar(area, sidebar_scroll, content);
 	if (remove >= 0) prefs::remove(remove);
 	// Folders dropped on free sidebar space are saved as locations.
-	if (dragging && drag_dirs && txt::empty(&drop_target) && ui::point_in(rl::get_mouse_position(), bar)) ui::outline(bar, ui::AQUA, 0, 2);
+	if (dragging && drag_dirs && txt::empty(&drop_target) && !drop_trash && ui::point_in(rl::get_mouse_position(), bar)) ui::outline(bar, ui::AQUA, 0, 2);
 }
 
 fn void update_drag()
@@ -408,7 +445,8 @@ fn void finish_drag(float h)
 	{
 		if (dragging && ui::top == 0)
 		{
-			if (!txt::empty(&drop_target)) { ops::transfer(txt::view(&directory), marked_names(), txt::view(&drop_target), ui::ctrl_down()); }
+			if (drop_trash) { ops::remove(txt::view(&directory), marked_names(), false); }
+			else if (!txt::empty(&drop_target)) { ops::transfer(txt::view(&directory), marked_names(), txt::view(&drop_target), ui::ctrl_down()); }
 			else if (over_bar && drag_dirs) { add_marked_locations(); }
 		}
 		pressed_entry = -1;
@@ -440,6 +478,7 @@ fn void finish_drag(float h)
 			String target = txt::view(&drop_target);
 			hint = string::tformat("%s to %s", ui::ctrl_down() ? "Copy" : "Move", target == "/" ? "/" : txt::basename(target));
 		}
+		else if (drop_trash) { hint = "Move to trash"; }
 		else if (over_bar && drag_dirs) { hint = drag_dirs == 1 ? "Save as location" : "Save as locations"; }
 		ui::panel({ mouse[0] + 14, mouse[1] + 14, 230, hint.len ? 60 : 42 }, ui::BG_HARD, 4);
 		bool single_dir = marked_count <= 1 && drag_dirs == 1;
@@ -456,6 +495,7 @@ fn void frame() => @pool()
 	ops::poll();
 	if (ops::take_refresh()) reload();
 	drop_target[0] = 0;
+	drop_trash = false;
 	if (ui::ctrl_down() && ui::letter('k') && !ops::modal())
 	{
 		settings::toggle();
@@ -547,7 +587,7 @@ fn void frame() => @pool()
 			if (ops::has_clip()) { ops::paste(txt::view(&directory)); }
 			else { ui::toast("Nothing to paste: copy (Ctrl+C) or cut (Ctrl+X) first", ui::YELLOW); }
 		}
-		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count) ops::remove(txt::view(&directory), marked_names(), ui::shift_down());
+		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count) ops::remove(txt::view(&directory), marked_names(), ui::shift_down() || txt::view(&directory) == txt::view(&trash_files));
 	}
 	ui::panel({ 0, 0, w, 60 }, ui::BG_HARD);
 	if (ui::icon_button({ 12, 12, 36, 36 }, ui::I_UP, ui::FG4, "Parent folder (Backspace)")) go(txt::dirname(txt::view(&directory)));
