@@ -9,13 +9,17 @@ c3c build
 ./build/sms -d /tmp
 ```
 
-Click a folder to enter it (opens on mouse release, so you can drag it instead). Files are listed and selectable; select a supported image to preview it. Launching files and file operations are intentionally not implemented yet. Hidden files are hidden by default; Ctrl+H toggles them using the cached listing (no filesystem rescan). Folders sort first, then names case-insensitively.
+Single-click to select; double-click a folder to enter it. The `../` parent row goes up with a single click. Folder dragging still saves locations without opening the folder. Files are listed and selectable; select a supported image to preview it. Double-click a file or select it and press Enter to launch its configured opener. File operations are not implemented. Hidden files are hidden by default; Ctrl+H toggles them using the cached listing (no filesystem rescan). Folders sort first, then names case-insensitively.
 
 - **../ row / Up / Backspace:** parent folder (`../` appears first in the list, except at filesystem root)
 - **Home button:** home folder
+- **Up/Down:** move the selection and scroll it into view (including the `../` parent row); hold to repeat
+- **Enter:** open the selected folder or launch the selected file’s configured opener; **Backspace:** go to the parent folder
 - **Ctrl+L:** edit the path; Enter navigates (relative paths use the displayed folder)
+- **Ctrl+F:** search file and folder names in the current directory (case-insensitive substring, not recursive). Results update as you type using the cached listing and respect hidden-file visibility. Enter leaves the filter applied; Escape or the search bar’s × clears it. Navigation clears the search.
 - **Ctrl+H:** show/hide hidden files (hidden on first launch; remembered thereafter)
 - **Ctrl+S:** show/hide the locations sidebar (visible on first launch; remembered thereafter)
+- **Ctrl+K:** open/close Settings, with **Keyboard shortcuts** and **File openers** tabs; Escape closes Settings
 - **Sidebar +:** save the current folder as a location; or drag a folder from the file list onto the sidebar. A small movement threshold distinguishes dragging from a click. Escape cancels a drag; dropping elsewhere does nothing. This only saves a shortcut—it never moves the folder.
 - Folders dropped onto the visible sidebar from another file manager are also accepted (where supported by the window system). Files are ignored; duplicate locations are not added.
 - Click a saved location to browse it, or its × to remove it. Home and File system are built in. The sidebar is 184 logical px wide with left-aligned icons and labels.
@@ -24,6 +28,30 @@ Click a folder to enter it (opens on mouse release, so you can drag it instead).
 - **Ctrl +/−:** file-list zoom, in 10% steps (50–250%); **Ctrl+0** resets it to 100%
 - **Ctrl+Shift +/−:** whole-UI zoom, in 25% steps (75–300%); **Ctrl+Shift+0** resets it to the monitor default
 - Both zoom levels are remembered. Plus/minus keys follow the keyboard layout; keypad +/− also work.
+
+## File openers
+
+Press **Ctrl+K**, then choose **File openers** to add, edit, or remove rules. Press **Save** to persist them. Edits apply in the current session; unsaved edits are lost on exit. Single-click still selects files and previews supported images; double-click or Enter launches the matching opener.
+
+Rules are stored in `$XDG_CONFIG_HOME/sms/openers`, falling back to `~/.config/sms/openers`. A missing file is created with this default:
+
+```text
+*.pdf | firefox-esr
+```
+
+Use comma-separated patterns to share an opener across file types:
+
+```text
+*.png,*.jpg,*.jpeg | your-image-viewer
+```
+
+The editor places patterns and their executable side by side on one row. Spaces around commas are ignored; empty alternatives (such as `*.png,`) are invalid. Commas are always separators, not literal filename characters.
+
+You can also edit this text file directly and restart sms. Blank lines and `#` comment lines are ignored. Patterns are case-sensitive filename globs (`*`, `?`, and bracket expressions), not paths; any pattern in a rule can match, and the first matching rule wins. An empty file disables all openers.
+
+The right-hand side is **one executable name or absolute executable path**, not a shell command. It can contain spaces if they are part of the executable path. sms searches `PATH` for executable names and passes the selected file’s absolute path as a single argument. Shell syntax, extra arguments, and placeholders are not supported; use a wrapper script if needed. Only configure executables you trust.
+
+Limits: 16 rules, 255 bytes per comma-separated pattern list, 1023 bytes per executable, config file under 22000 bytes, and at most 16 concurrent opener processes. Invalid/oversized configs disable all rules and show an error in Settings, without modifying the file. Missing matches and launch failures show a notification. Launches do not wait for the opener to finish.
 
 ## Install / uninstall (Linux)
 
@@ -75,6 +103,17 @@ Current boundaries: directory reads are synchronous on navigation, with a visibl
 `python3 tests/preview.py` checks image selection, aspect ratios, transparency, stale-result replacement, errors,
 limits, and clearing on navigation/non-image selection (requires visible X11/XTest and Pillow; Hyprland uses
 `hyprctl` for pointer placement). Tests locate their own process window, not an already-running sms window.
+
+Headless opener checks (use a temporary directory):
+
+```sh
+c3c compile tests/openers.c3 src/openers.c3 src/prefs.c3 --libdir bmu/lib --lib bmu --lib raylib6 -o /tmp/sms-openers-check
+tmp=$(mktemp -d)
+XDG_CONFIG_HOME="$tmp" /tmp/sms-openers-check "$tmp/sms"
+rm -rf "$tmp"
+```
+
+`python3 tests/settings.py` checks default opener creation, config persistence, first-match launching, literal filename arguments, modal keyboard isolation, and malformed configs under a temporary `XDG_CONFIG_HOME` (requires an unlocked X11 display and XTest). It saves settings screenshots under `/tmp/sms-settings-*.png`.
 
 `python3 tests/zoom.py` checks zoom shortcuts, independent scales, persistence, resets, and malformed settings under a temporary `XDG_CONFIG_HOME` (requires a visible X11 display and XTest).
 

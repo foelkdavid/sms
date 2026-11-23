@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -44,8 +45,15 @@ def main():
     binary.parent.mkdir(parents=True, exist_ok=True)
     desktop.parent.mkdir(parents=True, exist_ok=True)
     licenses.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(ROOT / "build/sms", binary)
-    binary.chmod(0o755)
+    # Replace the inode so reinstalling also works while sms is running.
+    with tempfile.NamedTemporaryFile(dir=binary.parent, prefix=".sms-", delete=False) as staged:
+        temporary = Path(staged.name)
+    try:
+        shutil.copyfile(ROOT / "build/sms", temporary)
+        temporary.chmod(0o755)
+        temporary.replace(binary)
+    finally:
+        temporary.unlink(missing_ok=True)
     for name in notices:
         destination = licenses / name
         shutil.copyfile(ROOT / "licenses" / name, destination)

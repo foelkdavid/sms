@@ -1,5 +1,6 @@
 """Installation integration check; all user paths are temporary."""
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,6 +24,16 @@ with tempfile.TemporaryDirectory(prefix="sms-install-") as temporary:
     desktop = data / 'applications/sms.desktop'
     assert binary.read_bytes() == (ROOT / 'build/sms').read_bytes()
     assert os.access(binary, os.X_OK)
+    # Use sleep as a display-independent running executable at the install path.
+    shutil.copyfile('/bin/sleep', binary)
+    running = subprocess.Popen([str(binary), '30'])
+    try:
+        target('install')
+        assert running.poll() is None, 'reinstall must not stop the running app'
+        assert binary.read_bytes() == (ROOT / 'build/sms').read_bytes()
+    finally:
+        running.terminate()
+        running.wait()
     text = desktop.read_text()
     assert '@EXEC@' not in text and '--dir' in text and '~' not in text
     for name in ('FONT-OFL.txt', 'RAYLIB-LICENSE.txt'):
