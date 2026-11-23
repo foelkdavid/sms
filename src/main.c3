@@ -883,18 +883,16 @@ fn void add_marked_locations() => @pool()
 	}
 }
 
-// Enter on a multi-selection launches the selected files (bounded by the opener slots).
+// Enter on a multi-selection opens the selected files: one opener process per rule with all its files.
 // Returns false when no files are selected (folders only).
 fn bool launch_marked() => @pool()
 {
-	bool found;
-	for (int i = 0; i < visible_count; i++)
-	{
-		if (!marked[i] || entries[visible[i]].dir) continue;
-		found = true;
-		if (!openers::launch(txt::join(txt::view(&directory), txt::view(&entries[visible[i]].name)))) break;
-	}
-	return found;
+	String[] files = mem::talloc_array(String, (usz)marked_count);
+	int n;
+	for (int i = 0; i < visible_count && n < marked_count; i++) if (marked[i] && !entries[visible[i]].dir) files[n++] = txt::view(&entries[visible[i]].name);
+	if (!n) return false;
+	openers::launch_many(txt::view(&directory), files[:n]);
+	return true;
 }
 
 fn void finish_drag(float h)
