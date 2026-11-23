@@ -39,6 +39,8 @@ bool[MAX_ENTRIES] cut_entry; // By entry index; dimmed while their cut is on the
 bool any_cut;
 char[4096] trash_files; // $XDG_DATA_HOME/Trash/files, resolved once at startup.
 bool drop_trash; // The current drag is over the sidebar's Trash row; reset every frame.
+int origin_entry = -1; // Entry whose trash origin is in origin_tip (one cached record, read on hover change only).
+char[4200] origin_tip;
 char[64] sel_status;
 int sel_status_count = -1;
 int pressed_row = -1;
@@ -130,6 +132,7 @@ fn bool navigate(String path) => @pool()
 	if (n < 0) { entry_count = 0; return false; }
 	entry_count = n;
 	clear_cut();
+	origin_entry = -1;
 	txt::set(&directory, txt::view(&resolved));
 	txt::set(&path_edit, txt::view(&directory));
 	searching = false;
@@ -345,6 +348,27 @@ fn void resolve_trash() => @pool()
 	fileop::trash_dir(&raw);
 	txt::append(&raw, "/files");
 	sys::realpath(&trash_files, txt::view(&raw).tcopy());
+}
+
+<* "Deleted from ~/Docs · 2026-11-23 14:02" for a trash entry; reads its .trashinfo only when the hovered entry changes. *>
+fn String trash_origin(int entry) => @pool()
+{
+	if (entry == origin_entry) return txt::view(&origin_tip);
+	origin_entry = entry;
+	char[4096] path;
+	char[32] date;
+	if (!fileop::trash_info(txt::view(&trash_files), txt::view(&entries[entry].name), &path, &date))
+	{
+		txt::set(&origin_tip, "No restore information");
+		return txt::view(&origin_tip);
+	}
+	String from = txt::dirname(txt::view(&path));
+	String home = sys::home();
+	if (home.len > 1 && from.starts_with(home) && (from.len == home.len || from[home.len] == '/')) from = string::tformat("~%s", from[home.len..]);
+	String when = txt::view(&date);
+	if (when.len > 16) when = when[:16]; // drop seconds
+	txt::set(&origin_tip, when.len ? string::tformat("Deleted from %s · %s", from, when) : string::tformat("Deleted from %s", from));
+	return txt::view(&origin_tip);
 }
 
 <* The shown folder is the trash or inside it: deleting there must be permanent, never trash-in-trash. *>
@@ -645,8 +669,7 @@ fn void frame() => @pool()
 		Rect tb = { left, 68, list_w - 10, 40 };
 		ui::panel(tb, ui::BG_HARD, 6);
 		ui::text(ui::I_TRASH, tb.x + 12, tb.y + 10, 18, ui::RED);
-		String hint = marked_count ? "Restore puts the selected items back where they were deleted from" : "Select items to restore them to their original folders";
-		ui::text_fit(hint, tb.x + 40, tb.y + 12, tb.width - 200, 14, ui::FG4);
+		ui::text("Trash", tb.x + 40, tb.y + 11, 16, ui::FG);
 		if (ui::button({ tb.x + tb.width - 148, tb.y + 4, 140, 32 }, "Restore", PRIMARY, ui::I_UNDO, marked_count > 0 && !ops::busy()))
 		{
 			ops::restore(txt::view(&directory), marked_names());
@@ -756,6 +779,7 @@ fn void frame() => @pool()
 			ui::outline(row, ui::AQUA, 4, 2);
 		}
 		bool dim = dim_cut && cut_entry[visible[vi]];
+		if (trash_top && hovered && !dragging && !banding) ui::tooltip(trash_origin(visible[vi]));
 		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
 		ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, dim ? ui::GRAY : ui::FG);
 		if (clicked)
