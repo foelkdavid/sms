@@ -2,7 +2,7 @@ module sms::settings;
 import std::math;
 import raylib6::rl;
 import bmu::ui, bmu::txt;
-import sms::openers;
+import sms::openers, sms::prefs;
 
 bool open;
 int tab;
@@ -16,13 +16,26 @@ struct Shortcut
 	String action;
 	bool heading;
 }
-Shortcut[23] shortcuts = {
+Shortcut[38] shortcuts = {
 	{ "NAVIGATION", "", true },
 	{ "Up / Down", "Move selection (hold to repeat)", false },
-	{ "Enter", "Open selected file or folder", false },
+	{ "Enter", "Open selected folder, or open selected files", false },
 	{ "Backspace", "Go to parent folder", false },
 	{ "Ctrl + L", "Edit folder path; Enter to go", false },
 	{ "F5", "Refresh current folder", false },
+	{ "SELECTION", "", true },
+	{ "Ctrl + click", "Add / remove one item", false },
+	{ "Shift + click", "Select a range (Ctrl + Shift adds it)", false },
+	{ "Shift + Up / Down", "Extend the selection", false },
+	{ "Ctrl + A", "Select all", false },
+	{ "Drag on empty space", "Draw a selection box (Ctrl adds)", false },
+	{ "Escape / click empty", "Clear the selection", false },
+	{ "FILES", "", true },
+	{ "Ctrl + C / Ctrl + X", "Copy / cut selected items", false },
+	{ "Ctrl + V", "Paste into this folder", false },
+	{ "Delete", "Move to trash (or delete, see General)", false },
+	{ "Shift + Delete", "Delete permanently (asks first)", false },
+	{ "Drag onto a folder", "Move there; hold Ctrl to copy", false },
 	{ "SEARCH & VIEW", "", true },
 	{ "Ctrl + F", "Search this folder", false },
 	{ "Enter in search", "Keep filter and focus file list", false },
@@ -39,7 +52,9 @@ Shortcut[23] shortcuts = {
 	{ "Single click", "Select a file or folder", false },
 	{ "Double click", "Open a file or folder", false },
 	{ "Click ../", "Go to parent folder", false },
-	{ "Drag folder", "Drop on sidebar to save a location", false }
+	{ "Drag onto ../ or a place", "Move there; hold Ctrl to copy", false },
+	{ "Drag onto sidebar", "Drop folders on empty sidebar space to save them", false },
+	{ "Close window", "Asks first while a file operation runs", false }
 };
 
 fn void toggle()
@@ -58,8 +73,10 @@ fn void draw()
 	float x = box.x + 16;
 	float width = box.width - 32;
 	float y = box.y + 54;
-	if (ui::button({ x, y, width * 0.5f - 4, 36 }, "Keyboard shortcuts", tab == 0 ? PRIMARY : NORMAL)) { tab = 0; ui::unfocus(); }
-	if (ui::button({ x + width * 0.5f + 4, y, width * 0.5f - 4, 36 }, "File openers", tab == 1 ? PRIMARY : NORMAL)) { tab = 1; ui::unfocus(); }
+	float tab_w = (width - 16) / 3;
+	if (ui::button({ x, y, tab_w, 36 }, "Keyboard shortcuts", tab == 0 ? PRIMARY : NORMAL)) { tab = 0; ui::unfocus(); }
+	if (ui::button({ x + tab_w + 8, y, tab_w, 36 }, "File openers", tab == 1 ? PRIMARY : NORMAL)) { tab = 1; ui::unfocus(); }
+	if (ui::button({ x + (tab_w + 8) * 2, y, tab_w, 36 }, "General", tab == 2 ? PRIMARY : NORMAL)) { tab = 2; ui::unfocus(); }
 	Rect area = { x, y + 48, width, box.height - 118 };
 	if (tab == 0)
 	{
@@ -87,6 +104,13 @@ fn void draw()
 		}
 		ui::end_clip();
 		ui::scrollbar(area, shortcuts_scroll, content);
+	}
+	else if (tab == 2)
+	{
+		if (ui::checkbox(x + 4, area.y + 8, "Move deleted files to the trash", &prefs::trash)) prefs::dirty = true;
+		ui::text_fit(prefs::trash
+			? "Delete moves items to the trash. Shift + Delete deletes permanently (asks first)."
+			: "Delete removes items permanently after a confirmation. Nothing goes to the trash.", x + 4, area.y + 44, width - 8, 14, ui::FG4);
 	}
 	else
 	{

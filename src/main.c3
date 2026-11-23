@@ -2,7 +2,7 @@ module sms;
 import std::math, std::core::string, std::io;
 import raylib6::rl;
 import bmu::ui, bmu::txt, bmu::sys;
-import sms::prefs, sms::preview, sms::settings, sms::openers;
+import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops;
 
 const int ID_PATH = 1;
 const int ID_SEARCH = 2;
@@ -25,7 +25,18 @@ bool[MAX_ENTRIES] marked; // Multi-selection by visible index.
 int marked_count;
 int anchor = -1; // Shift range origin (visible index).
 int collapse_row = -1; // Plain press on a marked row: collapse to it on release unless dragged.
-int drag_dirs; // Marked folders carried by the current drag (0 = single drag_path).
+int drag_dirs; // Marked folders carried by the current drag (saved as locations when dropped on the sidebar).
+char[4096] drop_target; // Folder under the mouse that accepts the current drag (empty = none); reset every frame.
+bool band_pending; // Press on empty space / a row's blank area: a selection box starts once the mouse moves.
+bool banding;
+bool band_additive; // Ctrl held at start: the box adds to band_base instead of replacing.
+float band_x0;
+float band_y0; // Content coordinates (list top + scroll), so the box survives scrolling.
+int band_lo;
+int band_hi = -1;
+bool[MAX_ENTRIES] band_base;
+bool[MAX_ENTRIES] cut_entry; // By entry index; dimmed while their cut is on the clipboard.
+bool any_cut;
 char[64] sel_status;
 int sel_status_count = -1;
 int pressed_row = -1;
@@ -79,7 +90,7 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; Ctrl+A selects all; Escape clears.\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
@@ -93,6 +104,7 @@ fn int main(String[] args)
 	ui::zoom_shift_only = true;
 	defer ui::close();
 	defer preview::close();
+	defer ops::close();
 	ui::app_args(args);
 	while (ui::running()) frame();
 	return 0;
@@ -114,6 +126,7 @@ fn bool navigate(String path) => @pool()
 	int n = sys::list_dir(txt::view(&resolved), &entries, true);
 	if (n < 0) { entry_count = 0; return false; }
 	entry_count = n;
+	clear_cut();
 	txt::set(&directory, txt::view(&resolved));
 	txt::set(&path_edit, txt::view(&directory));
 	searching = false;
@@ -145,6 +158,123 @@ fn void refilter() => @pool()
 	scroll = 0;
 	pressed_entry = -1;
 	dragging = false;
+	band_pending = false;
+	banding = false;
+}
+
+fn void clear_cut()
+{
+	if (!any_cut) return;
+	for (int i = 0; i < entry_count; i++) cut_entry[i] = false;
+	any_cut = false;
+}
+
+<* Names of the selected entries (temp array of views, valid until the next navigation). *>
+fn String[] marked_names()
+{
+	String[] out = mem::talloc_array(String, (usz)marked_count);
+	int n;
+	for (int i = 0; i < visible_count && n < marked_count; i++) if (marked[i]) out[n++] = txt::view(&entries[visible[i]].name);
+	return out[:n];
+}
+
+<* Re-list the current folder after a file operation, keeping search and scroll position. *>
+fn void reload() => @pool()
+{
+	float keep = scroll;
+	bool was_searching = searching;
+	char[256] keep_search = search;
+	if (!navigate(txt::view(&directory).tcopy())) return;
+	if (was_searching)
+	{
+		searching = true;
+		search = keep_search;
+		refilter();
+	}
+	scroll = keep;
+}
+
+<* Mark band rows [lo, hi] (hi < lo = none); rows leaving the band return to their base state. *>
+fn void band_apply(int lo, int hi)
+{
+	if (lo == band_lo && hi == band_hi) return;
+	int a = hi >= lo ? lo : band_lo;
+	int b = hi >= lo ? hi : band_hi;
+	if (band_hi >= band_lo) { a = math::min(a, band_lo); b = math::max(b, band_hi); }
+	for (int i = math::max(a, 0); i <= b && i < visible_count; i++)
+	{
+		mark(i, (i >= lo && i <= hi) || (band_additive && band_base[i]));
+	}
+	band_lo = lo;
+	band_hi = hi;
+}
+
+fn void band_start(float x, float content_y)
+{
+	band_pending = true;
+	banding = false;
+	band_x0 = x;
+	band_y0 = content_y;
+	press_at = rl::get_mouse_position();
+}
+
+<* Selection box: starts after a 6 px move, auto-scrolls at the list edges, updates marks only when its row range changes. *>
+fn void update_band(Rect list, float row_h, int parent_rows, float content)
+{
+	if (!band_pending && !banding) return;
+	rl::RLVector2 mouse = rl::get_mouse_position();
+	if (!rl::is_mouse_button_down(rl::RLMouseButton.LEFT) || ui::top != 0 || !rl::is_window_focused())
+	{
+		if (banding && band_hi >= band_lo)
+		{
+			int origin = math::clamp((int)(band_y0 / row_h) - parent_rows, band_lo, band_hi);
+			anchor = origin;
+			select_entry(origin == band_lo ? band_hi : band_lo);
+		}
+		band_pending = false;
+		banding = false;
+		return;
+	}
+	if (band_pending)
+	{
+		float dx = mouse[0] - press_at[0];
+		float dy = mouse[1] - press_at[1];
+		if (dx * dx + dy * dy < 36) return;
+		band_pending = false;
+		banding = true;
+		band_additive = ui::ctrl_down();
+		if (band_additive) { for (int i = 0; i < visible_count; i++) band_base[i] = marked[i]; }
+		else { clear_marks(); }
+		band_lo = 0;
+		band_hi = -1;
+		pressed_row = -1;
+		last_click_row = -1;
+		collapse_row = -1;
+		pressed_entry = -1;
+		dragging = false;
+	}
+	float max_scroll = math::max(0.0f, content - list.height);
+	if (mouse[1] < list.y) scroll = math::max(0.0f, scroll - math::min(40.0f, (list.y - mouse[1]) * 0.5f));
+	if (mouse[1] > list.y + list.height) scroll = math::min(max_scroll, scroll + math::min(40.0f, (mouse[1] - list.y - list.height) * 0.5f));
+	float y1 = math::clamp(mouse[1] - list.y + scroll, 0.0f, content);
+	float top = math::min(band_y0, y1);
+	float bottom = math::max(band_y0, y1);
+	int lo = math::max(0, (int)(top / row_h) - parent_rows);
+	int hi = math::min(visible_count - 1, (int)((bottom - 0.01f) / row_h) - parent_rows);
+	if (bottom - top < 1) hi = lo - 1;
+	band_apply(lo, hi);
+}
+
+fn void draw_band(Rect list)
+{
+	if (!banding) return;
+	rl::RLVector2 mouse = rl::get_mouse_position();
+	float y0 = list.y + band_y0 - scroll;
+	float x1 = math::clamp(mouse[0], list.x, list.x + list.width);
+	float y1 = math::clamp(mouse[1], list.y, list.y + list.height);
+	Rect r = { math::min(band_x0, x1), math::min(y0, y1), math::abs(x1 - band_x0), math::abs(y1 - y0) };
+	ui::panel(r, { 142, 192, 124, 40 });
+	ui::outline(r, ui::AQUA, 0, 1);
 }
 
 fn void select_entry(int vi) => @pool()
@@ -181,7 +311,12 @@ fn void sidebar_location(Rect row, String path, String name, String icon)
 	if (ui::hover(row))
 	{
 		ui::panel(row, ui::BG1, 4);
-		ui::tooltip(path);
+		if (dragging && path != txt::view(&directory))
+		{
+			txt::set(&drop_target, path);
+			ui::outline(row, ui::AQUA, 4, 2);
+		}
+		else if (!dragging) { ui::tooltip(path); }
 	}
 	ui::text(icon, row.x + 8, row.y + 8, 23, ui::YELLOW);
 	ui::text_fit(name, row.x + 40, row.y + 12, row.width - 44, 16, ui::FG);
@@ -192,7 +327,6 @@ fn void draw_sidebar(float h)
 {
 	Rect bar = { 0, 60, SIDE_W, h - 88 };
 	ui::panel(bar, ui::BG_HARD);
-	if (dragging && ui::point_in(rl::get_mouse_position(), bar)) ui::outline(bar, ui::AQUA, 0, 2);
 	ui::text("LOCATIONS", 16, 76, 15, ui::GRAY);
 	if (ui::icon_button({ SIDE_W - 42, 68, 30, 30 }, ui::I_PLUS, ui::FG4, "Add current folder (or drag a folder here)")) add_location(txt::view(&directory));
 	sidebar_location({ 8, 104, SIDE_W - 16, 40 }, sys::home(), "Home", ui::I_HOME);
@@ -215,6 +349,8 @@ fn void draw_sidebar(float h)
 	ui::end_clip();
 	ui::scrollbar(area, sidebar_scroll, content);
 	if (remove >= 0) prefs::remove(remove);
+	// Folders dropped on free sidebar space are saved as locations.
+	if (dragging && drag_dirs && txt::empty(&drop_target) && ui::point_in(rl::get_mouse_position(), bar)) ui::outline(bar, ui::AQUA, 0, 2);
 }
 
 fn void update_drag()
@@ -270,10 +406,10 @@ fn void finish_drag(float h)
 	bool over_bar = prefs::sidebar && ui::point_in(rl::get_mouse_position(), bar);
 	if (pressed_entry >= 0 && rl::is_mouse_button_released(rl::RLMouseButton.LEFT))
 	{
-		if (dragging && over_bar && ui::top == 0)
+		if (dragging && ui::top == 0)
 		{
-			if (drag_dirs) { add_marked_locations(); }
-			else { add_location(txt::view(&drag_path)); }
+			if (!txt::empty(&drop_target)) { ops::transfer(txt::view(&directory), marked_names(), txt::view(&drop_target), ui::ctrl_down()); }
+			else if (over_bar && drag_dirs) { add_marked_locations(); }
 		}
 		pressed_entry = -1;
 		dragging = false;
@@ -298,17 +434,29 @@ fn void finish_drag(float h)
 	if (dragging)
 	{
 		rl::RLVector2 mouse = rl::get_mouse_position();
-		ui::panel({ mouse[0] + 14, mouse[1] + 14, 210, 42 }, ui::BG_HARD, 4);
-		ui::text(ui::I_FOLDER, mouse[0] + 24, mouse[1] + 22, 23, ui::YELLOW);
-		String label = drag_dirs ? string::tformat("%d folder%s", drag_dirs, drag_dirs == 1 ? "" : "s") : txt::basename(txt::view(&drag_path));
-		ui::text_fit(label, mouse[0] + 56, mouse[1] + 27, 154, 16, ui::FG);
+		String hint = "";
+		if (!txt::empty(&drop_target))
+		{
+			String target = txt::view(&drop_target);
+			hint = string::tformat("%s to %s", ui::ctrl_down() ? "Copy" : "Move", target == "/" ? "/" : txt::basename(target));
+		}
+		else if (over_bar && drag_dirs) { hint = drag_dirs == 1 ? "Save as location" : "Save as locations"; }
+		ui::panel({ mouse[0] + 14, mouse[1] + 14, 230, hint.len ? 60 : 42 }, ui::BG_HARD, 4);
+		bool single_dir = marked_count <= 1 && drag_dirs == 1;
+		ui::text(single_dir ? ui::I_FOLDER : ui::I_FILE, mouse[0] + 24, mouse[1] + 22, 23, single_dir ? ui::YELLOW : ui::GRAY);
+		String label = marked_count > 1 ? string::tformat("%d items", marked_count) : txt::basename(txt::view(&drag_path));
+		ui::text_fit(label, mouse[0] + 56, mouse[1] + 27, 174, 16, ui::FG);
+		if (hint.len) ui::text_fit(hint, mouse[0] + 56, mouse[1] + 50, 174, 14, ui::AQUA);
 	}
 }
 
 fn void frame() => @pool()
 {
-	ui::frame_begin(settings::open);
-	if (ui::ctrl_down() && ui::letter('k'))
+	ui::frame_begin(settings::open || ops::modal());
+	ops::poll();
+	if (ops::take_refresh()) reload();
+	drop_target[0] = 0;
+	if (ui::ctrl_down() && ui::letter('k') && !ops::modal())
 	{
 		settings::toggle();
 		ui::top = settings::open ? 1 : 0;
@@ -383,6 +531,23 @@ fn void frame() => @pool()
 			if (anchor < 0) anchor = selected;
 		}
 		if (!was_pressing && !searching && rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { clear_marks(); anchor = -1; collapse_row = -1; }
+		if (ui::ctrl_down() && (ui::letter('c') || ui::letter('x')) && marked_count)
+		{
+			bool cut = ui::letter('x');
+			clear_cut();
+			if (cut)
+			{
+				for (int i = 0; i < visible_count; i++) if (marked[i]) cut_entry[visible[i]] = true;
+				any_cut = true;
+			}
+			ops::set_clipboard(txt::view(&directory), marked_names(), cut);
+		}
+		if (ui::ctrl_down() && ui::letter('v'))
+		{
+			if (ops::has_clip()) { ops::paste(txt::view(&directory)); }
+			else { ui::toast("Nothing to paste: copy (Ctrl+C) or cut (Ctrl+X) first", ui::YELLOW); }
+		}
+		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count) ops::remove(txt::view(&directory), marked_names(), ui::shift_down());
 	}
 	ui::panel({ 0, 0, w, 60 }, ui::BG_HARD);
 	if (ui::icon_button({ 12, 12, 36, 36 }, ui::I_UP, ui::FG4, "Parent folder (Backspace)")) go(txt::dirname(txt::view(&directory)));
@@ -414,8 +579,11 @@ fn void frame() => @pool()
 	}
 	bool show_preview = preview::active;
 	float preview_w = show_preview ? math::min(360.0f, (w - left - 8) * 0.45f) : 0;
-	Rect list = { left, 68, w - left - 8 - (show_preview ? preview_w + 8 : 0), h - 104 };
-	Rect preview_panel = { w - preview_w - 8, 68, preview_w, h - 104 };
+	float ops_h = ops::panel_height();
+	float main_h = h - 104 - (ops_h > 0 ? ops_h + 8 : 0);
+	Rect list = { left, 68, w - left - 8 - (show_preview ? preview_w + 8 : 0), main_h };
+	Rect preview_panel = { w - preview_w - 8, 68, preview_w, main_h };
+	Rect ops_panel = { left, 68 + main_h + 8, w - left - 8, ops_h };
 	int parent_rows = txt::view(&directory) == "/" || !txt::empty(&search) ? 0 : 1;
 	int row_count = visible_count + parent_rows;
 	float content_scale = (float)prefs::content_percent / 100;
@@ -466,6 +634,8 @@ fn void frame() => @pool()
 		}
 	}
 	scroll = ui::scroll_wheel(list, scroll, content);
+	update_band(list, row_h, parent_rows, content);
+	bool dim_cut = any_cut && ops::is_cut(txt::view(&directory));
 	ui::begin_clip(list);
 	// Virtualized list: visit only the rows that can actually be seen.
 	int first = math::max(0, (int)(scroll / row_h));
@@ -493,6 +663,11 @@ fn void frame() => @pool()
 		{
 			if (selected == -2) { ui::panel(row, ui::BG2, 4); }
 			else if (hovered) { ui::panel(row, ui::BG1, 4); }
+			if (dragging && hovered)
+			{
+				txt::set(&drop_target, txt::dirname(txt::view(&directory)));
+				ui::outline(row, ui::AQUA, 4, 2);
+			}
 			ui::text(ui::I_UP, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, ui::YELLOW);
 			ui::text("../", row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, text_size, ui::FG);
 			if (clicked) { select_only(-2); go_up = true; }
@@ -503,11 +678,21 @@ fn void frame() => @pool()
 		if (marked[vi]) { ui::panel(row, ui::BG2, 4); }
 		else if (hovered) { ui::panel(row, ui::BG1, 4); }
 		if (selected == vi && (marked_count > 1 || !marked[vi])) ui::outline(row, ui::BG4, 4);
-		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, entry.dir ? ui::YELLOW : ui::GRAY);
-		ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, ui::FG);
+		bool drop_here = dragging && hovered && entry.dir && !marked[vi];
+		if (drop_here)
+		{
+			txt::set(&drop_target, txt::join(txt::view(&directory), txt::view(&entry.name)));
+			ui::outline(row, ui::AQUA, 4, 2);
+		}
+		bool dim = dim_cut && cut_entry[visible[vi]];
+		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
+		ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, dim ? ui::GRAY : ui::FG);
 		if (clicked)
 		{
 			collapse_row = -1;
+			// Blank space right of the name starts a selection box instead of a file drag (measured on press only).
+			float name_end = row.x + 60 * content_scale + ui::text_w(txt::view(&entry.name), text_size) + 16 * content_scale;
+			bool blank = rl::get_mouse_position()[0] > name_end;
 			if (shift)
 			{
 				if (anchor < 0) anchor = selected >= 0 ? selected : vi;
@@ -533,25 +718,32 @@ fn void frame() => @pool()
 				select_only(vi);
 			}
 			drag_dirs = 0;
-			if (!ctrl && !shift && marked[vi])
+			if (blank && !shift)
 			{
-				if (marked_count > 1)
-				{
-					for (int k = 0; k < visible_count; k++) if (marked[k] && entries[visible[k]].dir) drag_dirs++;
-				}
-				if (entry.dir || drag_dirs)
-				{
-					pressed_entry = visible[vi];
-					press_at = rl::get_mouse_position();
-					dragging = false;
-					txt::set(&drag_path, txt::join(txt::view(&directory), txt::view(&entry.name)));
-				}
+				band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
+			}
+			else if (!ctrl && !shift && marked[vi])
+			{
+				// Counted once per press, never per frame.
+				for (int k = 0; k < visible_count; k++) if (marked[k] && entries[visible[k]].dir) drag_dirs++;
+				pressed_entry = visible[vi];
+				press_at = rl::get_mouse_position();
+				dragging = false;
+				txt::set(&drag_path, txt::join(txt::view(&directory), txt::view(&entry.name)));
 			}
 		}
 		// Activate only after a completed double-click, never after a drag.
 		if (activated && !dragging) enter = visible[vi];
 	}
 	if (!visible_count) ui::text(txt::empty(&search) ? "Empty folder" : "No matching files", list.x + 16 * content_scale, list.y + (float)parent_rows * row_h + 16 * content_scale, text_size, ui::GRAY);
+	// A press on empty list space clears the selection (unless Ctrl/Shift) and may start a selection box.
+	if (ui::clicked(list))
+	{
+		ui::unfocus();
+		if (!ctrl && !shift) select_only(-1);
+		band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
+	}
+	draw_band(list);
 	ui::end_clip();
 	ui::scrollbar(list, scroll, content);
 	// Navigate after drawing: do not mutate the entry array during iteration.
@@ -564,6 +756,7 @@ fn void frame() => @pool()
 		else { openers::launch(path); }
 	}
 	if (show_preview && preview::active) preview::draw(preview_panel);
+	ops::draw_panel(ops_panel);
 	ui::panel({ 0, h - 28, w, 28 }, ui::BG_HARD);
 	ui::text(txt::view(&status), 16, h - 22, 16, ui::GRAY);
 	if (marked_count != sel_status_count)
@@ -575,5 +768,6 @@ fn void frame() => @pool()
 	finish_drag(h);
 	if (rl::is_mouse_button_released(rl::RLMouseButton.LEFT) || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { pressed_row = -1; collapse_row = -1; }
 	settings::draw();
+	ops::draw_dialogs();
 	ui::frame_end();
 }

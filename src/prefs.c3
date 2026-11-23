@@ -12,6 +12,7 @@ Place[MAX_PLACES] places;
 int place_count;
 bool hidden;
 bool sidebar = true;
+bool trash = true; // Del moves to the trash; false = permanent delete after confirmation
 int content_percent = 100;
 int ui_percent; // 0 = monitor default until the user adjusts whole-UI zoom
 bool dirty;
@@ -39,6 +40,7 @@ fn void load() => @pool()
 	{
 		if (line.starts_with("hidden=")) hidden = line == "hidden=1";
 		if (line.starts_with("sidebar=")) sidebar = line != "sidebar=0";
+		if (line.starts_with("trash=")) trash = line != "trash=0";
 		if (line.starts_with("content_scale="))
 		{
 			if (try value = line[14..].to_int()) if (value >= 50 && value <= 250) content_percent = value;
@@ -62,6 +64,7 @@ fn bool save() => @pool()
 	if (!folder.len || !sys::mkdirs(folder)) return false;
 	txt::set(&data, hidden ? "hidden=1\n" : "hidden=0\n");
 	txt::append(&data, sidebar ? "sidebar=1\n" : "sidebar=0\n");
+	txt::append(&data, trash ? "trash=1\n" : "trash=0\n");
 	txt::append(&data, string::tformat("content_scale=%d\nui_scale=%d\n", content_percent, ui_percent));
 	for (int i = 0; i < place_count; i++)
 	{
