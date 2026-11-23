@@ -1,7 +1,7 @@
 module sms;
 import std::math, std::core::string, std::io, libc;
 import raylib6::rl;
-import bmu::ui, bmu::txt, bmu::sys, bmu::fileop;
+import bmu::ui, bmu::txt, bmu::sys, bmu::fileop, bmu::find;
 import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops;
 
 const int ID_PATH = 1;
@@ -16,6 +16,16 @@ char[4096] directory;
 char[4096] path_edit;
 char[256] search;
 bool searching;
+// Ctrl+Shift+F: recursive search results replace the list (bmu::find worker; restarted 150 ms after typing).
+bool deep;
+find::Finder finder;
+double deep_due; // 0 = no restart pending
+int deep_sel = -1;
+float deep_scroll;
+int deep_click = -1;
+double deep_click_time;
+int deep_shown = -1; // results count / state the status text was built for
+bool deep_shown_busy;
 sys::Entry[MAX_ENTRIES] entries;
 int entry_count;
 int[MAX_ENTRIES] visible;
@@ -54,6 +64,15 @@ int list_gen; // bumped by refilter(): the listing (and entry indices) changed
 fileop::Job size_job;
 double size_due; // 0 = nothing pending
 char[160] info_counts; // "2 folders, 3 files"
+char[64] info_sizepart; // "4.2 MB", "counting…", "S for size"
+char[64] info_when;
+char[512] info_suffix; // " · deleted from …" in the trash
+char[4096] info_single_path;
+bool info_single_dir;
+bool info_deep;
+int info_dirs;
+int info_files;
+bool size_all; // S pressed: folders are included in the size
 struct TypeName { String ext; String name; }
 TypeName[*] type_names = {
 	{ "md", "Markdown" }, { "markdown", "Markdown" }, { "txt", "Text" }, { "log", "Log file" }, { "csv", "CSV table" },
@@ -147,7 +166,7 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
@@ -164,6 +183,7 @@ fn int main(String[] args)
 	defer preview::close();
 	defer ops::close();
 	defer size_job.close();
+	defer finder.close();
 	ui::app_args(args);
 	while (ui::running()) frame();
 	return 0;
@@ -190,6 +210,7 @@ fn bool navigate(String path) => @pool()
 	txt::set(&directory, txt::view(&resolved));
 	txt::set(&path_edit, txt::view(&directory));
 	searching = false;
+	stop_deep();
 	txt::set(&search, "");
 	refilter();
 	return true;
@@ -244,13 +265,15 @@ fn void reload() => @pool()
 {
 	float keep = scroll;
 	bool was_searching = searching;
+	bool was_deep = deep;
 	char[256] keep_search = search;
 	if (!navigate(txt::view(&directory).tcopy())) return;
 	if (was_searching)
 	{
 		searching = true;
 		search = keep_search;
-		refilter();
+		if (was_deep) { deep = true; deep_due = ui::now; refilter_keep_search(); }
+		else { refilter(); }
 	}
 	scroll = keep;
 }
@@ -346,8 +369,141 @@ fn void select_entry(int vi) => @pool()
 	else { preview::select(txt::join(txt::view(&directory), txt::view(&entries[visible[vi]].name))); }
 }
 
+fn void stop_deep()
+{
+	finder.close();
+	deep = false;
+	deep_due = 0;
+	deep_sel = -1;
+	deep_scroll = 0;
+	deep_click = -1;
+	deep_shown = -1;
+}
+
+<* Enter recursive search (Ctrl+Shift+F) or switch back to filtering this folder (Ctrl+F). *>
+fn void start_search(bool recursive)
+{
+	searching = true;
+	pressed_entry = -1;
+	dragging = false;
+	if (recursive != deep)
+	{
+		bool had_deep = deep;
+		stop_deep();
+		deep = recursive;
+		if (deep) { select_only(-1); deep_due = ui::now; }
+		if (had_deep || deep) refilter_keep_search();
+	}
+	ui::focus_on(ID_SEARCH, &search);
+}
+
+<* The plain list shows everything while recursive search owns the query. *>
+fn void refilter_keep_search()
+{
+	char[256] keep = search;
+	if (deep) txt::set(&search, "");
+	refilter();
+	search = keep;
+	if (deep) status_for_deep(true);
+}
+
+fn String deep_path(int i) => txt::join(txt::view(&directory), finder.rel(i));
+
+<* Status text for recursive search; rebuilt only when the count or state changes. *>
+fn void status_for_deep(bool force = false) => @pool()
+{
+	int n = finder.results();
+	bool busy = finder.searching() || deep_due > 0;
+	if (!force && n == deep_shown && busy == deep_shown_busy) return;
+	deep_shown = n;
+	deep_shown_busy = busy;
+	String more = busy ? " · searching…" : finder.limited() ? " · limit reached" : "";
+	txt::set(&status, string::tformat("%d %s in all subfolders%s", n, n == 1 ? "result" : "results", more));
+	list_gen++; // re-measure the status width
+}
+
+fn void deep_select(int i) => @pool()
+{
+	if (deep_sel == i) return;
+	deep_sel = i;
+	if (i < 0 || finder.is_dir(i)) { preview::clear(); }
+	else { preview::select(deep_path(i)); }
+}
+
+fn void deep_open(int i) => @pool()
+{
+	String path = deep_path(i);
+	if (finder.is_dir(i)) { go(path); }
+	else { openers::launch(path); }
+}
+
+<* Recursive results: virtualized two-line rows (name, folder), keys, click / double-click. *>
+fn void draw_deep(Rect list, float row_h, float icon_size, float text_size, float cs, bool keys) => @pool()
+{
+	if (deep_due > 0 && ui::now >= deep_due)
+	{
+		deep_due = 0;
+		finder.close();
+		deep_sel = -1;
+		deep_scroll = 0;
+		if (!txt::empty(&search)) finder.start(txt::view(&directory), txt::view(&search), prefs::hidden);
+	}
+	status_for_deep();
+	int n = finder.results();
+	int open = -1;
+	if (keys && n > 0)
+	{
+		int step = (int)ui::repeat(rl::RLKeyboardKey.DOWN) - (int)ui::repeat(rl::RLKeyboardKey.UP);
+		if (step)
+		{
+			int next = deep_sel < 0 ? (step > 0 ? 0 : n - 1) : math::clamp(deep_sel + step, 0, n - 1);
+			deep_select(next);
+			float y = (float)next * row_h;
+			if (y < deep_scroll) deep_scroll = y;
+			if (y + row_h > deep_scroll + list.height) deep_scroll = y + row_h - list.height;
+		}
+		if (rl::is_key_pressed(rl::RLKeyboardKey.ENTER) && deep_sel >= 0) open = deep_sel;
+	}
+	float content = (float)n * row_h;
+	deep_scroll = ui::scroll_wheel(list, deep_scroll, content);
+	ui::begin_clip(list);
+	int first = math::max(0, (int)(deep_scroll / row_h));
+	int end = math::min(n, first + (int)(list.height / row_h) + 2);
+	float small = text_size * 0.68f;
+	for (int i = first; i < end; i++)
+	{
+		Rect row = { list.x, list.y + (float)i * row_h - deep_scroll, list.width - 10, row_h };
+		bool hovered = ui::hover(row);
+		if (deep_sel == i) { ui::panel(row, ui::BG2, 4); }
+		else if (hovered) { ui::panel(row, ui::BG1, 4); }
+		bool dir = finder.is_dir(i);
+		ui::text(dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * cs, row.y + (row_h - icon_size) / 2, icon_size, dir ? ui::YELLOW : ui::GRAY);
+		float top = row.y + (row_h - text_size - small - 3 * cs) / 2;
+		float tw = math::max(0.0f, row.width - 72 * cs);
+		ui::text_fit(finder.name(i), row.x + 60 * cs, top, tw, text_size, ui::FG);
+		String folder = finder.folder(i);
+		ui::text_tail(folder.len ? folder : "(this folder)", row.x + 60 * cs, top + text_size + 3 * cs, tw, small, ui::GRAY);
+		if (ui::clicked(row))
+		{
+			ui::unfocus();
+			if (deep_click == i && ui::now - deep_click_time <= 0.4) { open = i; deep_click = -1; }
+			else { deep_click = i; deep_click_time = ui::now; }
+			deep_select(i);
+		}
+	}
+	if (!n)
+	{
+		String msg = txt::empty(&search) ? "Type to search all subfolders" : finder.searching() || deep_due > 0 ? "Searching…" : "No matches";
+		ui::text(msg, list.x + 16 * cs, list.y + 16 * cs, text_size, ui::GRAY);
+	}
+	ui::end_clip();
+	ui::scrollbar(list, deep_scroll, content);
+	if (open >= 0) deep_open(open); // after drawing: navigation closes the finder
+}
+
 fn void close_search()
 {
+	stop_deep();
 	searching = false;
 	txt::set(&search, "");
 	ui::unfocus();
@@ -405,87 +561,157 @@ fn void resolve_trash() => @pool()
 	sys::realpath(&trash_files, txt::view(&raw).tcopy());
 }
 
-<* Rebuild the bottom-bar selection details when the selection changed: one lstat for a single item, a count for several. *>
+<* "~/x" for paths under the home folder (temp). *>
+fn String home_short(String p)
+{
+	String home = sys::home();
+	if (home.len > 1 && p.starts_with(home) && (p.len == home.len || p[home.len] == '/')) return string::tformat("~%s", p[home.len..]);
+	return p;
+}
+
+<* Bottom-bar text from its parts: multi-selection counts or a single folder, plus the size part. *>
+fn void compose_detail() => @pool()
+{
+	String size = txt::view(&info_sizepart);
+	if (info_single_dir)
+	{
+		txt::set(&info_detail, string::tformat("Folder · %s · modified %s%s", size, txt::view(&info_when), txt::view(&info_suffix)));
+	}
+	else
+	{
+		txt::set(&info_detail, size.len ? string::tformat("%s · %s", txt::view(&info_counts), size) : txt::view(&info_counts));
+	}
+}
+
+<* One item: type, size (files), modified time from one lstat; folders get their size on S. *>
+fn void describe_single(String path, String shown, int trash_entry) => @pool()
+{
+	txt::set(&info_name, shown);
+	libc::Stat st;
+	if (libc::lstat(path.zstr_tcopy(), &st) != 0) { txt::set(&info_detail, "cannot read"); return; }
+	uint kind = st.st_mode & 0xF000;
+	char[32] when;
+	libc::Tm tm;
+	Time_t mt = st.st_mtime;
+	libc::localtime_r(&mt, &tm);
+	libc::strftime(&when, when.len, "%Y-%m-%d %H:%M", &tm);
+	txt::set(&info_when, ((ZString)&when).str_view());
+	txt::set(&info_suffix, trash_entry >= 0 ? string::tformat(" · %s", trash_origin(trash_entry)) : "");
+	if (kind == 0x4000)
+	{
+		info_single_dir = true;
+		txt::set(&info_single_path, path);
+		txt::set(&info_sizepart, "S for size");
+		compose_detail();
+		return;
+	}
+	String type = kind == 0xA000 ? "Link" : kind != 0x8000 ? "Special file" : type_name(txt::basename(path), (st.st_mode & 0o111) != 0);
+	char[32] size;
+	ops::size_text(&size, (ulong)st.st_size);
+	String detail = kind == 0x8000
+		? string::tformat("%s · %s · modified %s", type, txt::view(&size), txt::view(&info_when))
+		: string::tformat("%s · modified %s", type, txt::view(&info_when));
+	txt::set(&info_detail, string::tformat("%s%s", detail, txt::view(&info_suffix)));
+}
+
+<* Rebuild the bottom-bar details when the selection changed. Several items: counts now, file sizes in the background. *>
 fn void update_info(bool trash_top) => @pool()
 {
-	if (selected == info_selected && marked_count == info_marked && list_gen == info_gen) return;
+	int key = deep ? deep_sel : selected;
+	if (key == info_selected && marked_count == info_marked && list_gen == info_gen && deep == info_deep) return;
 	if (list_gen != info_gen) status_w = ui::text_w(txt::view(&status), 16);
-	info_selected = selected;
+	info_selected = key;
 	info_marked = marked_count;
 	info_gen = list_gen;
+	info_deep = deep;
 	info_name[0] = 0;
 	info_detail[0] = 0;
+	info_sizepart[0] = 0;
+	info_suffix[0] = 0;
+	info_single_dir = false;
+	info_dirs = 0;
+	info_files = 0;
+	size_all = false;
 	size_due = 0;
-	size_job.close();
-	if (marked_count > 1)
+	size_job.close(); // a running count is for the old selection
+	if (deep)
 	{
-		int dirs;
-		for (int i = 0; i < visible_count; i++) if (marked[i] && entries[visible[i]].dir) dirs++;
-		int files = marked_count - dirs;
+		if (deep_sel >= 0) describe_single(deep_path(deep_sel), home_short(deep_path(deep_sel)), -1);
+	}
+	else if (marked_count > 1)
+	{
+		for (int i = 0; i < visible_count; i++) if (marked[i] && entries[visible[i]].dir) info_dirs++;
+		info_files = marked_count - info_dirs;
 		txt::set(&info_name, string::tformat("%d selected", marked_count));
-		String d = dirs ? string::tformat("%d %s", dirs, dirs == 1 ? "folder" : "folders") : "";
-		String f = files ? string::tformat("%d %s", files, files == 1 ? "file" : "files") : "";
+		String d = info_dirs ? string::tformat("%d %s", info_dirs, info_dirs == 1 ? "folder" : "folders") : "";
+		String f = info_files ? string::tformat("%d %s", info_files, info_files == 1 ? "file" : "files") : "";
 		txt::set(&info_counts, d.len && f.len ? string::tformat("%s, %s", d, f) : d.len ? d : f);
-		txt::set(&info_detail, string::tformat("%s · counting…", txt::view(&info_counts)));
-		size_job.close(); // a running count is for the old selection
-		size_due = ui::now + 0.25;
+		// Files are sized automatically (debounced); folders only on S.
+		if (info_files) { txt::set(&info_sizepart, "counting…"); size_due = ui::now + 0.25; }
+		else { txt::set(&info_sizepart, "S for size"); }
+		compose_detail();
 	}
 	else
 	{
 		int vi = selected;
 		if (marked_count == 1) { for (int i = 0; i < visible_count; i++) if (marked[i]) { vi = i; break; } }
-		if (vi < 0) return;
-		int entry = visible[vi];
-		String name = txt::view(&entries[entry].name);
-		txt::set(&info_name, name);
-		libc::Stat st;
-		if (libc::lstat(txt::join(txt::view(&directory), name).zstr_tcopy(), &st) != 0)
+		if (vi >= 0)
 		{
-			txt::set(&info_detail, "cannot read");
-		}
-		else
-		{
-			uint kind = st.st_mode & 0xF000;
-			String type;
-			if (kind == 0x4000) { type = "Folder"; }
-			else if (kind == 0xA000) { type = "Link"; }
-			else if (kind != 0x8000) { type = "Special file"; }
-			else
-			{
-				type = type_name(name, (st.st_mode & 0o111) != 0);
-			}
-			char[32] size;
-			ops::size_text(&size, (ulong)st.st_size);
-			char[32] when;
-			libc::Tm tm;
-			Time_t mt = st.st_mtime;
-			libc::localtime_r(&mt, &tm);
-			libc::strftime(&when, when.len, "%Y-%m-%d %H:%M", &tm);
-			String detail = kind == 0x8000
-				? string::tformat("%s · %s · modified %s", type, txt::view(&size), ((ZString)&when).str_view())
-				: string::tformat("%s · modified %s", type, ((ZString)&when).str_view());
-			if (trash_top) detail = string::tformat("%s · %s", detail, trash_origin(entry));
-			txt::set(&info_detail, detail);
+			String name = txt::view(&entries[visible[vi]].name);
+			describe_single(txt::join(txt::view(&directory), name), name, trash_top ? visible[vi] : -1);
 		}
 	}
 	info_name_w = ui::text_w(txt::view(&info_name), 16);
 }
 
-<* Start the debounced selection COUNT and show its total when it ends (no per-frame I/O or formatting). *>
+<* S: size the selected folders too (recursive, background). *>
+fn void size_folders() => @pool()
+{
+	if (size_all || (!info_dirs && !info_single_dir)) return;
+	size_all = true;
+	size_due = 0;
+	size_job.close();
+	bool ok;
+	if (info_single_dir)
+	{
+		String path = txt::view(&info_single_path);
+		String[1] one = { txt::basename(path) };
+		ok = size_job.start(COUNT, txt::dirname(path), &one);
+	}
+	else
+	{
+		ok = size_job.start(COUNT, txt::view(&directory), marked_names());
+	}
+	txt::set(&info_sizepart, ok ? "counting…" : "size unavailable");
+	compose_detail();
+}
+
+<* Start the debounced file-size COUNT and show totals when a count ends (no per-frame I/O or formatting). *>
 fn void poll_selection_size() => @pool()
 {
-	if (size_due > 0 && ui::now >= size_due && marked_count > 1)
+	if (size_due > 0 && ui::now >= size_due && marked_count > 1 && !deep)
 	{
 		size_due = 0;
-		if (!size_job.start(COUNT, txt::view(&directory), marked_names())) txt::set(&info_detail, txt::view(&info_counts));
+		String[] files = mem::talloc_array(String, (usz)marked_count);
+		int n;
+		for (int i = 0; i < visible_count && n < marked_count; i++) if (marked[i] && !entries[visible[i]].dir) files[n++] = txt::view(&entries[visible[i]].name);
+		if (!n || !size_job.start(COUNT, txt::view(&directory), files[:n])) { info_sizepart[0] = 0; compose_detail(); }
 	}
 	fileop::Progress p;
 	if (!size_job.finished(&p)) return;
 	char[32] size;
 	ops::size_text(&size, p.bytes_total);
-	if (p.state == DONE) { txt::set(&info_detail, string::tformat("%s · %s", txt::view(&info_counts), txt::view(&size))); }
-	else if (p.state == FAILED) { txt::set(&info_detail, string::tformat("%s · at least %s", txt::view(&info_counts), txt::view(&size))); }
-	else { txt::set(&info_detail, txt::view(&info_counts)); }
+	String total = p.state == FAILED ? string::tformat("at least %s", txt::view(&size)) : txt::view(&size);
+	if (p.state != DONE && p.state != FAILED) { info_sizepart[0] = 0; }
+	else if (info_single_dir)
+	{
+		char[32] items;
+		ops::group_digits(&items, math::max(0, p.files_total - 1));
+		txt::set(&info_sizepart, string::tformat("%s, %s %s", total, txt::view(&items), p.files_total == 2 ? "item" : "items"));
+	}
+	else if (!size_all && info_dirs) { txt::set(&info_sizepart, string::tformat("%s in files · S adds folders", total)); }
+	else { txt::set(&info_sizepart, total); }
+	compose_detail();
 }
 
 <* "deleted from ~/Docs on 2026-11-23 14:02" for a trash entry; reads its .trashinfo only when the hovered entry changes. *>
@@ -718,13 +944,7 @@ fn void frame() => @pool()
 			if (searching) close_search();
 			ui::focus_on(ID_PATH, &path_edit);
 		}
-		if (ui::ctrl_down() && ui::letter('f'))
-		{
-			searching = true;
-			pressed_entry = -1;
-			dragging = false;
-			ui::focus_on(ID_SEARCH, &search);
-		}
+		if (ui::ctrl_down() && ui::letter('f')) start_search(ui::shift_down());
 	}
 	if (ui::top == 0 && ui::focus < 0)
 	{
@@ -732,7 +952,8 @@ fn void frame() => @pool()
 		{
 			prefs::hidden = !prefs::hidden;
 			prefs::dirty = true;
-			refilter();
+			if (deep) { deep_due = ui::now; refilter_keep_search(); }
+			else { refilter(); }
 		}
 		if (ui::ctrl_down() && ui::letter('s'))
 		{
@@ -741,14 +962,15 @@ fn void frame() => @pool()
 		}
 		if (rl::is_key_pressed(rl::RLKeyboardKey.BACKSPACE)) go(txt::dirname(txt::view(&directory)));
 		if (rl::is_key_pressed(rl::RLKeyboardKey.F5)) go(txt::view(&directory));
-		if (ui::ctrl_down() && ui::letter('a') && visible_count)
+		if (!ui::ctrl_down() && ui::letter('s') && !deep) size_folders();
+		if (ui::ctrl_down() && ui::letter('a') && visible_count && !deep)
 		{
 			mark_range(0, visible_count - 1);
 			if (selected < 0) { select_entry(0); }
 			if (anchor < 0) anchor = selected;
 		}
 		if (!was_pressing && !searching && rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { clear_marks(); anchor = -1; collapse_row = -1; }
-		if (ui::ctrl_down() && (ui::letter('c') || ui::letter('x')) && marked_count)
+		if (ui::ctrl_down() && (ui::letter('c') || ui::letter('x')) && marked_count && !deep)
 		{
 			bool cut = ui::letter('x');
 			clear_cut();
@@ -764,7 +986,7 @@ fn void frame() => @pool()
 			if (ops::has_clip()) { ops::paste(txt::view(&directory)); }
 			else { ui::toast("Nothing to paste: copy (Ctrl+C) or cut (Ctrl+X) first", ui::YELLOW); }
 		}
-		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count) ops::remove(txt::view(&directory), marked_names(), ui::shift_down() || in_trash());
+		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count && !deep) ops::remove(txt::view(&directory), marked_names(), ui::shift_down() || in_trash());
 	}
 	ui::panel({ 0, 0, w, 60 }, ui::BG_HARD);
 	if (ui::icon_button({ 12, 12, 36, 36 }, ui::I_UP, ui::FG4, "Parent folder (Backspace)")) go(txt::dirname(txt::view(&directory)));
@@ -772,7 +994,11 @@ fn void frame() => @pool()
 	bool submitted;
 	if (searching)
 	{
-		if (ui::input(ID_SEARCH, { 100, 12, w - 192, 36 }, &search, "Search this folder", &submitted, ui::I_SEARCH)) refilter();
+		if (ui::input(ID_SEARCH, { 100, 12, w - 192, 36 }, &search, deep ? "Search all subfolders" : "Search this folder", &submitted, ui::I_SEARCH))
+		{
+			if (deep) { deep_due = ui::now + 0.15; deep_shown = -1; }
+			else { refilter(); }
+		}
 		if (submitted) ui::unfocus();
 	}
 	else
@@ -783,7 +1009,7 @@ fn void frame() => @pool()
 	if (ui::icon_button({ w - 84, 12, 32, 36 }, searching ? ui::I_TIMES : ui::I_SEARCH, ui::FG4, searching ? "Clear search (Escape)" : "Search this folder (Ctrl+F)"))
 	{
 		if (searching) { close_search(); }
-		else { searching = true; ui::focus_on(ID_SEARCH, &search); }
+		else { start_search(false); }
 	}
 	if (ui::icon_button({ w - 44, 12, 32, 36 }, ui::I_REFRESH, ui::FG4, "Refresh (F5)")) go(txt::view(&directory));
 	ui::hline(0, 59, w);
@@ -816,7 +1042,7 @@ fn void frame() => @pool()
 	Rect list = { left, 68 + bar_h, list_w, main_h - bar_h };
 	Rect preview_panel = { w - preview_w - 8, 68, preview_w, main_h };
 	Rect ops_panel = { left, 68 + main_h + 8, w - left - 8, ops_h };
-	int parent_rows = txt::view(&directory) == "/" || !txt::empty(&search) ? 0 : 1;
+	int parent_rows = txt::view(&directory) == "/" || !txt::empty(&search) || deep ? 0 : 1;
 	int row_count = visible_count + parent_rows;
 	float content_scale = (float)prefs::content_percent / 100;
 	float row_h = ROW * content_scale;
@@ -828,164 +1054,171 @@ fn void frame() => @pool()
 	bool multi_enter;
 	bool ctrl = ui::ctrl_down();
 	bool shift = ui::shift_down();
-	if (list_keys && ui::focus < 0 && !submitted && !ui::ctrl_down() && row_count > 0)
+	if (deep)
 	{
-		int step = (int)ui::repeat(rl::RLKeyboardKey.DOWN) - (int)ui::repeat(rl::RLKeyboardKey.UP);
-		if (step)
-		{
-			int current = selected == -2 ? 0 : selected < 0 ? -1 : selected + parent_rows;
-			int next = current < 0 ? (step > 0 ? 0 : row_count - 1) : math::clamp(current + step, 0, row_count - 1);
-			if (ui::shift_down() && visible_count)
-			{
-				// Ranges never include the parent row.
-				next = math::max(next, parent_rows);
-				int vi = next - parent_rows;
-				if (anchor < 0) anchor = selected >= 0 ? selected : vi;
-				clear_marks();
-				mark_range(anchor, vi);
-				select_entry(vi);
-			}
-			else
-			{
-				select_only(next < parent_rows ? -2 : next - parent_rows);
-			}
-			collapse_row = -1;
-			float y = (float)next * row_h;
-			if (y < scroll) scroll = y;
-			if (y + row_h > scroll + list.height) scroll = y + row_h - list.height;
-			pressed_entry = -1;
-			pressed_row = -1;
-			last_click_row = -1;
-			dragging = false;
-		}
-		if (rl::is_key_pressed(rl::RLKeyboardKey.ENTER))
-		{
-			if (selected == -2) { go_up = true; }
-			else if (marked_count > 1) { multi_enter = true; }
-			if (selected >= 0) { enter = visible[selected]; }
-		}
+		draw_deep(list, row_h, icon_size, text_size, content_scale, list_keys && !submitted);
 	}
-	scroll = ui::scroll_wheel(list, scroll, content);
-	update_band(list, row_h, parent_rows, content);
-	bool dim_cut = any_cut && ops::is_cut(txt::view(&directory));
-	ui::begin_clip(list);
-	// Virtualized list: visit only the rows that can actually be seen.
-	int first = math::max(0, (int)(scroll / row_h));
-	int end = math::min(row_count, first + (int)(list.height / row_h) + 2);
-	for (int i = first; i < end; i++)
+	else
 	{
-		Rect row = { list.x, list.y + (float)i * row_h - scroll, list.width - 10, row_h };
-		bool hovered = ui::hover(row);
-		bool clicked = ui::clicked(row);
-		bool activated;
-		if (clicked)
+		if (list_keys && ui::focus < 0 && !submitted && !ui::ctrl_down() && row_count > 0)
 		{
-			pressed_row = i;
-			ui::unfocus();
-		}
-		if (pressed_row == i && hovered && ui::live() && rl::is_mouse_button_released(rl::RLMouseButton.LEFT))
-		{
-			activated = !ctrl && !shift && last_click_row == i && ui::now - last_click_time <= 0.4;
-			if (collapse_row == i - parent_rows && !dragging) select_only(collapse_row);
-			collapse_row = -1;
-			last_click_row = activated ? -1 : i;
-			last_click_time = ui::now;
-		}
-		if (parent_rows && i == 0)
-		{
-			if (selected == -2) { ui::panel(row, ui::BG2, 4); }
-			else if (hovered) { ui::panel(row, ui::BG1, 4); }
-			if (dragging && hovered)
+			int step = (int)ui::repeat(rl::RLKeyboardKey.DOWN) - (int)ui::repeat(rl::RLKeyboardKey.UP);
+			if (step)
 			{
-				txt::set(&drop_target, txt::dirname(txt::view(&directory)));
+				int current = selected == -2 ? 0 : selected < 0 ? -1 : selected + parent_rows;
+				int next = current < 0 ? (step > 0 ? 0 : row_count - 1) : math::clamp(current + step, 0, row_count - 1);
+				if (ui::shift_down() && visible_count)
+				{
+					// Ranges never include the parent row.
+					next = math::max(next, parent_rows);
+					int vi = next - parent_rows;
+					if (anchor < 0) anchor = selected >= 0 ? selected : vi;
+					clear_marks();
+					mark_range(anchor, vi);
+					select_entry(vi);
+				}
+				else
+				{
+					select_only(next < parent_rows ? -2 : next - parent_rows);
+				}
+				collapse_row = -1;
+				float y = (float)next * row_h;
+				if (y < scroll) scroll = y;
+				if (y + row_h > scroll + list.height) scroll = y + row_h - list.height;
+				pressed_entry = -1;
+				pressed_row = -1;
+				last_click_row = -1;
+				dragging = false;
+			}
+			if (rl::is_key_pressed(rl::RLKeyboardKey.ENTER))
+			{
+				if (selected == -2) { go_up = true; }
+				else if (marked_count > 1) { multi_enter = true; }
+				if (selected >= 0) { enter = visible[selected]; }
+			}
+		}
+		scroll = ui::scroll_wheel(list, scroll, content);
+		update_band(list, row_h, parent_rows, content);
+		bool dim_cut = any_cut && ops::is_cut(txt::view(&directory));
+		ui::begin_clip(list);
+		// Virtualized list: visit only the rows that can actually be seen.
+		int first = math::max(0, (int)(scroll / row_h));
+		int end = math::min(row_count, first + (int)(list.height / row_h) + 2);
+		for (int i = first; i < end; i++)
+		{
+			Rect row = { list.x, list.y + (float)i * row_h - scroll, list.width - 10, row_h };
+			bool hovered = ui::hover(row);
+			bool clicked = ui::clicked(row);
+			bool activated;
+			if (clicked)
+			{
+				pressed_row = i;
+				ui::unfocus();
+			}
+			if (pressed_row == i && hovered && ui::live() && rl::is_mouse_button_released(rl::RLMouseButton.LEFT))
+			{
+				activated = !ctrl && !shift && last_click_row == i && ui::now - last_click_time <= 0.4;
+				if (collapse_row == i - parent_rows && !dragging) select_only(collapse_row);
+				collapse_row = -1;
+				last_click_row = activated ? -1 : i;
+				last_click_time = ui::now;
+			}
+			if (parent_rows && i == 0)
+			{
+				if (selected == -2) { ui::panel(row, ui::BG2, 4); }
+				else if (hovered) { ui::panel(row, ui::BG1, 4); }
+				if (dragging && hovered)
+				{
+					txt::set(&drop_target, txt::dirname(txt::view(&directory)));
+					ui::outline(row, ui::AQUA, 4, 2);
+				}
+				ui::text(ui::I_UP, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, ui::YELLOW);
+				ui::text("../", row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, text_size, ui::FG);
+				if (clicked) { select_only(-2); go_up = true; }
+				continue;
+			}
+			int vi = i - parent_rows;
+			sys::Entry* entry = &entries[visible[vi]];
+			if (marked[vi]) { ui::panel(row, ui::BG2, 4); }
+			else if (hovered) { ui::panel(row, ui::BG1, 4); }
+			if (selected == vi && (marked_count > 1 || !marked[vi])) ui::outline(row, ui::BG4, 4);
+			bool drop_here = dragging && hovered && entry.dir && !marked[vi];
+			if (drop_here)
+			{
+				txt::set(&drop_target, txt::join(txt::view(&directory), txt::view(&entry.name)));
 				ui::outline(row, ui::AQUA, 4, 2);
 			}
-			ui::text(ui::I_UP, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, ui::YELLOW);
-			ui::text("../", row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, text_size, ui::FG);
-			if (clicked) { select_only(-2); go_up = true; }
-			continue;
+			bool dim = dim_cut && cut_entry[visible[vi]];
+			ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
+			ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, dim ? ui::GRAY : ui::FG);
+			if (clicked)
+			{
+				collapse_row = -1;
+				// Blank space right of the name starts a selection box instead of a file drag (measured on press only).
+				float name_end = row.x + 60 * content_scale + ui::text_w(txt::view(&entry.name), text_size) + 16 * content_scale;
+				bool blank = rl::get_mouse_position()[0] > name_end;
+				if (shift)
+				{
+					if (anchor < 0) anchor = selected >= 0 ? selected : vi;
+					if (!ctrl) clear_marks();
+					mark_range(anchor, vi);
+					select_entry(vi);
+				}
+				else if (ctrl)
+				{
+					mark(vi, !marked[vi]);
+					anchor = vi;
+					select_entry(vi);
+				}
+				else if (marked[vi] && marked_count > 1)
+				{
+					// Keep the selection so it can be dragged; a plain release collapses it.
+					collapse_row = vi;
+					anchor = vi;
+					select_entry(vi);
+				}
+				else
+				{
+					select_only(vi);
+				}
+				drag_dirs = 0;
+				if (blank && !shift)
+				{
+					band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
+				}
+				else if (!ctrl && !shift && marked[vi])
+				{
+					// Counted once per press, never per frame.
+					for (int k = 0; k < visible_count; k++) if (marked[k] && entries[visible[k]].dir) drag_dirs++;
+					pressed_entry = visible[vi];
+					press_at = rl::get_mouse_position();
+					dragging = false;
+					txt::set(&drag_path, txt::join(txt::view(&directory), txt::view(&entry.name)));
+				}
+			}
+			// Activate only after a completed double-click, never after a drag.
+			if (activated && !dragging) enter = visible[vi];
 		}
-		int vi = i - parent_rows;
-		sys::Entry* entry = &entries[visible[vi]];
-		if (marked[vi]) { ui::panel(row, ui::BG2, 4); }
-		else if (hovered) { ui::panel(row, ui::BG1, 4); }
-		if (selected == vi && (marked_count > 1 || !marked[vi])) ui::outline(row, ui::BG4, 4);
-		bool drop_here = dragging && hovered && entry.dir && !marked[vi];
-		if (drop_here)
+		if (!visible_count) ui::text(txt::empty(&search) ? "Empty folder" : "No matching files", list.x + 16 * content_scale, list.y + (float)parent_rows * row_h + 16 * content_scale, text_size, ui::GRAY);
+		// A press on empty list space clears the selection (unless Ctrl/Shift) and may start a selection box.
+		if (ui::clicked(list))
 		{
-			txt::set(&drop_target, txt::join(txt::view(&directory), txt::view(&entry.name)));
-			ui::outline(row, ui::AQUA, 4, 2);
+			ui::unfocus();
+			if (!ctrl && !shift) select_only(-1);
+			band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
 		}
-		bool dim = dim_cut && cut_entry[visible[vi]];
-		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
-		ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, dim ? ui::GRAY : ui::FG);
-		if (clicked)
+		draw_band(list);
+		ui::end_clip();
+		ui::scrollbar(list, scroll, content);
+		// Navigate after drawing: do not mutate the entry array during iteration.
+		if (go_up) { go(txt::dirname(txt::view(&directory))); }
+		else if (multi_enter && launch_marked()) {}
+		else if (enter >= 0)
 		{
-			collapse_row = -1;
-			// Blank space right of the name starts a selection box instead of a file drag (measured on press only).
-			float name_end = row.x + 60 * content_scale + ui::text_w(txt::view(&entry.name), text_size) + 16 * content_scale;
-			bool blank = rl::get_mouse_position()[0] > name_end;
-			if (shift)
-			{
-				if (anchor < 0) anchor = selected >= 0 ? selected : vi;
-				if (!ctrl) clear_marks();
-				mark_range(anchor, vi);
-				select_entry(vi);
-			}
-			else if (ctrl)
-			{
-				mark(vi, !marked[vi]);
-				anchor = vi;
-				select_entry(vi);
-			}
-			else if (marked[vi] && marked_count > 1)
-			{
-				// Keep the selection so it can be dragged; a plain release collapses it.
-				collapse_row = vi;
-				anchor = vi;
-				select_entry(vi);
-			}
-			else
-			{
-				select_only(vi);
-			}
-			drag_dirs = 0;
-			if (blank && !shift)
-			{
-				band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
-			}
-			else if (!ctrl && !shift && marked[vi])
-			{
-				// Counted once per press, never per frame.
-				for (int k = 0; k < visible_count; k++) if (marked[k] && entries[visible[k]].dir) drag_dirs++;
-				pressed_entry = visible[vi];
-				press_at = rl::get_mouse_position();
-				dragging = false;
-				txt::set(&drag_path, txt::join(txt::view(&directory), txt::view(&entry.name)));
-			}
+			String path = txt::join(txt::view(&directory), txt::view(&entries[enter].name));
+			if (entries[enter].dir) { go(path); }
+			else { openers::launch(path); }
 		}
-		// Activate only after a completed double-click, never after a drag.
-		if (activated && !dragging) enter = visible[vi];
-	}
-	if (!visible_count) ui::text(txt::empty(&search) ? "Empty folder" : "No matching files", list.x + 16 * content_scale, list.y + (float)parent_rows * row_h + 16 * content_scale, text_size, ui::GRAY);
-	// A press on empty list space clears the selection (unless Ctrl/Shift) and may start a selection box.
-	if (ui::clicked(list))
-	{
-		ui::unfocus();
-		if (!ctrl && !shift) select_only(-1);
-		band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
-	}
-	draw_band(list);
-	ui::end_clip();
-	ui::scrollbar(list, scroll, content);
-	// Navigate after drawing: do not mutate the entry array during iteration.
-	if (go_up) { go(txt::dirname(txt::view(&directory))); }
-	else if (multi_enter && launch_marked()) {}
-	else if (enter >= 0)
-	{
-		String path = txt::join(txt::view(&directory), txt::view(&entries[enter].name));
-		if (entries[enter].dir) { go(path); }
-		else { openers::launch(path); }
 	}
 	if (show_preview && preview::active) preview::draw(preview_panel);
 	ops::draw_panel(ops_panel);
@@ -1001,8 +1234,9 @@ fn void frame() => @pool()
 		// Selection details left, folder item count right.
 		float right = w - 16 - status_w;
 		ui::text(txt::view(&status), right, h - 22, 16, ui::GRAY);
-		float name_w = math::min(info_name_w, (right - 40) * 0.5f);
-		ui::text_fit(txt::view(&info_name), 16, h - 22, name_w, 16, ui::FG);
+		float name_w = math::min(info_name_w, (right - 40) * (deep ? 0.6f : 0.5f));
+		if (deep) { ui::text_tail(txt::view(&info_name), 16, h - 22, name_w, 16, ui::FG); }
+		else { ui::text_fit(txt::view(&info_name), 16, h - 22, name_w, 16, ui::FG); }
 		ui::text_fit(txt::view(&info_detail), 16 + name_w + 12, h - 22, math::max(0.0f, right - name_w - 52), 16, ui::FG4);
 	}
 	finish_drag(h);

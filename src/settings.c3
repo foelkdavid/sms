@@ -16,7 +16,7 @@ struct Shortcut
 	String action;
 	bool heading;
 }
-Shortcut[39] shortcuts = {
+Shortcut[41] shortcuts = {
 	{ "NAVIGATION", "", true },
 	{ "Up / Down", "Move selection (hold to repeat)", false },
 	{ "Enter", "Open selected folder, or open selected files", false },
@@ -28,6 +28,7 @@ Shortcut[39] shortcuts = {
 	{ "Shift + click", "Select a range (Ctrl + Shift adds it)", false },
 	{ "Shift + Up / Down", "Extend the selection", false },
 	{ "Ctrl + A", "Select all", false },
+	{ "S", "Include folder sizes in the selection size", false },
 	{ "Drag on empty space", "Draw a selection box (Ctrl adds)", false },
 	{ "Escape / click empty", "Clear the selection", false },
 	{ "FILES", "", true },
@@ -39,6 +40,7 @@ Shortcut[39] shortcuts = {
 	{ "Restore (in Trash)", "Put selected items back where they came from", false },
 	{ "SEARCH & VIEW", "", true },
 	{ "Ctrl + F", "Search this folder", false },
+	{ "Ctrl + Shift + F", "Search all subfolders (full path below)", false },
 	{ "Enter in search", "Keep filter and focus file list", false },
 	{ "Ctrl + H", "Show / hide hidden files", false },
 	{ "Ctrl + S", "Show / hide sidebar", false },
