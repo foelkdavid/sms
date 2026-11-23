@@ -74,6 +74,9 @@ fn void Names.free(&self)
 fileop::Job job;
 fileop::Job counter;           // COUNT for the permanent-delete question (independent of `job`)
 fileop::Progress counted;
+fileop::Job sizer;             // background COUNT of the trash for the sidebar badge
+bool size_dirty = true;
+char[24] trash_size;           // "4.2 GB"; empty = unknown or empty trash
 bool counting;
 char[96] count_text;
 int count_shown = -1;
@@ -117,6 +120,7 @@ fn void close()
 {
 	job.close();
 	counter.close();
+	sizer.close();
 	clip.free();
 	pending.free();
 }
@@ -162,10 +166,17 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 		case TRASH: txt::set(&title, string::tformat("Moving %s to the trash", what));
 		case DELETE: txt::set(&title, string::tformat("Deleting %s", what));
 		case COUNT: txt::set(&title, string::tformat("Counting %s", what));
+		case RESTORE: txt::set(&title, string::tformat("Restoring %s", what));
 	}
 	txt::set(&detail, "Preparing…");
 	job.status(&cur);
 	return true;
+}
+
+<* Move trashed items (names in the trash's files/ folder) back to where they were deleted from. *>
+fn void restore(String trash_files, String[] names)
+{
+	if (names.len) begin(RESTORE, trash_files, names);
 }
 
 fn void set_clipboard(String dir, String[] names, bool cut) => @pool()
@@ -226,6 +237,7 @@ fn void poll() => @pool()
 	{
 		cur = done;
 		refresh = true;
+		size_dirty = true;
 		finished(&done);
 	}
 	else if (job.busy())
@@ -251,12 +263,31 @@ fn void finished(fileop::Progress* p) => @pool()
 				case MOVE: ui::toast(string::tformat("Moved %s%s", what, skipped), ui::GREEN);
 				case TRASH: ui::toast(string::tformat("Moved %s to the trash", what), ui::GREEN);
 				case DELETE: ui::toast(string::tformat("Deleted %s", what), ui::GREEN);
+				case RESTORE: ui::toast(string::tformat("Restored %s%s", what, skipped), ui::GREEN);
 				case COUNT: break;
 			}
 		case CANCELLED:
 			ui::toast(job_kind == COPY || job_kind == MOVE ? "Cancelled: nothing was changed" : "Cancelled", ui::YELLOW);
 		default:
 			ui::toast(txt::empty(&p.error) ? "The file operation failed" : txt::view(&p.error), ui::RED);
+	}
+}
+
+<* Trash size for the sidebar: one COUNT of `<trash>/files` when dirty, never per-frame I/O. *>
+fn void poll_trash_size(String trash_root)
+{
+	fileop::Progress p;
+	if (sizer.finished(&p))
+	{
+		// files_total counts the files/ folder itself: 1 = empty trash.
+		if (p.state == DONE && p.files_total > 1) { size_text(&trash_size, p.bytes_total); }
+		else if (p.state == DONE || p.state == FAILED) { trash_size[0] = 0; }
+	}
+	if (size_dirty && !sizer.busy())
+	{
+		size_dirty = false;
+		String[1] files = { "files" };
+		if (!sizer.start(COUNT, trash_root, &files)) trash_size[0] = 0;
 	}
 }
 
@@ -342,7 +373,7 @@ fn void draw_panel(Rect r)
 	ui::outline(r, ui::BG2, 6);
 	float x = r.x + 14;
 	float w = r.width - 28;
-	String icon = job_kind == TRASH || job_kind == DELETE ? ui::I_TRASH : job_kind == MOVE ? ui::I_CUT : ui::I_COPY;
+	String icon = job_kind == TRASH || job_kind == DELETE ? ui::I_TRASH : job_kind == MOVE ? ui::I_CUT : job_kind == RESTORE ? ui::I_UNDO : ui::I_COPY;
 	ui::text(icon, x, r.y + 12, 18, ui::AQUA);
 	ui::text_fit(txt::view(&title), x + 28, r.y + 13, w - 76, 16, ui::FG);
 	bool can = cur.can_cancel;

@@ -308,7 +308,7 @@ fn void add_location(String path)
 }
 
 // App-specific location rows: icons and labels share the same left edge.
-fn void sidebar_location(Rect row, String path, String name, String icon, bool trash = false)
+fn void sidebar_location(Rect row, String path, String name, String icon, bool trash = false, String badge = "")
 {
 	if (path == txt::view(&directory)) ui::panel(row, ui::BG2, 4);
 	if (ui::hover(row))
@@ -323,11 +323,17 @@ fn void sidebar_location(Rect row, String path, String name, String icon, bool t
 		}
 		else if (!dragging) { ui::tooltip(path); }
 	}
-	ui::text(icon, row.x + 8, row.y + 8, 23, ui::YELLOW);
-	ui::text_fit(name, row.x + 40, row.y + 12, row.width - 44, 16, ui::FG);
+	ui::text(icon, row.x + 8, row.y + 8, 23, trash ? ui::RED : ui::YELLOW);
+	float badge_w = badge.len ? ui::text_w(badge, 13) + 8 : 0;
+	ui::text_fit(name, row.x + 40, row.y + 12, row.width - 44 - badge_w, 16, ui::FG);
+	if (badge.len) ui::text(badge, row.x + row.width - badge_w, row.y + 14, 13, ui::GRAY);
 	if (ui::clicked(row))
 	{
-		if (trash) ensure_trash();
+		if (trash)
+		{
+			ensure_trash();
+			ops::size_dirty = true;
+		}
 		go(path);
 	}
 }
@@ -373,7 +379,7 @@ fn void draw_sidebar(float h)
 	float extra = 0;
 	if (prefs::trash)
 	{
-		sidebar_location({ 8, 184, SIDE_W - 16, 40 }, txt::view(&trash_files), "Trash", ui::I_TRASH, true);
+		sidebar_location({ 8, 184, SIDE_W - 16, 40 }, txt::view(&trash_files), "Trash", ui::I_TRASH, true, txt::view(&ops::trash_size));
 		extra = 40;
 	}
 	ui::hline(12, 192 + extra, SIDE_W - 24);
@@ -504,6 +510,7 @@ fn void frame() => @pool()
 	if (ops::take_refresh()) reload();
 	drop_target[0] = 0;
 	drop_trash = false;
+	if (prefs::trash) ops::poll_trash_size(txt::dirname(txt::view(&trash_files)));
 	if (ui::ctrl_down() && ui::letter('k') && !ops::modal())
 	{
 		settings::toggle();
@@ -629,7 +636,23 @@ fn void frame() => @pool()
 	float preview_w = show_preview ? math::min(360.0f, (w - left - 8) * 0.45f) : 0;
 	float ops_h = ops::panel_height();
 	float main_h = h - 104 - (ops_h > 0 ? ops_h + 8 : 0);
-	Rect list = { left, 68, w - left - 8 - (show_preview ? preview_w + 8 : 0), main_h };
+	// Trash top level: a slim bar with Restore above the list.
+	bool trash_top = txt::view(&directory) == txt::view(&trash_files);
+	float bar_h = trash_top ? 48.0f : 0.0f;
+	float list_w = w - left - 8 - (show_preview ? preview_w + 8 : 0);
+	if (trash_top)
+	{
+		Rect tb = { left, 68, list_w - 10, 40 };
+		ui::panel(tb, ui::BG_HARD, 6);
+		ui::text(ui::I_TRASH, tb.x + 12, tb.y + 10, 18, ui::RED);
+		String hint = marked_count ? "Restore puts the selected items back where they were deleted from" : "Select items to restore them to their original folders";
+		ui::text_fit(hint, tb.x + 40, tb.y + 12, tb.width - 200, 14, ui::FG4);
+		if (ui::button({ tb.x + tb.width - 148, tb.y + 4, 140, 32 }, "Restore", PRIMARY, ui::I_UNDO, marked_count > 0 && !ops::busy()))
+		{
+			ops::restore(txt::view(&directory), marked_names());
+		}
+	}
+	Rect list = { left, 68 + bar_h, list_w, main_h - bar_h };
 	Rect preview_panel = { w - preview_w - 8, 68, preview_w, main_h };
 	Rect ops_panel = { left, 68 + main_h + 8, w - left - 8, ops_h };
 	int parent_rows = txt::view(&directory) == "/" || !txt::empty(&search) ? 0 : 1;
