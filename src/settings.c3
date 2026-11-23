@@ -10,7 +10,7 @@ int tab;
 float shortcuts_scroll;
 float rules_scroll;
 const float RULE_ROW = 44;
-ui::Shortcut[45] shortcuts = {
+ui::Shortcut[52] shortcuts = {
 	{ "NAVIGATION", "", true },
 	{ "Up / Down", "Move selection (hold to repeat)", false },
 	{ "Enter", "Open selected folder, or open selected files", false },
@@ -35,6 +35,13 @@ ui::Shortcut[45] shortcuts = {
 	{ "Drag onto a folder", "Move there; hold Ctrl to copy", false },
 	{ "Drop from another app", "Copy into the folder under the pointer (Trash: trash)", false },
 	{ "Restore (in Trash)", "Put selected items back where they came from", false },
+	{ "ARCHIVES", "", true },
+	{ "Enter / double click", "Browse an archive (zip, tar, 7z, rar, …) unless an opener matches", false },
+	{ "Right click an archive", "Browse, Extract here, Extract to…", false },
+	{ "Inside an archive", "Read only; double click opens a temporary copy (see General)", false },
+	{ "Right click inside", "Extract the selection next to the archive, or to a folder", false },
+	{ "Ctrl + C inside", "Copy entries; Ctrl + V in a folder extracts them", false },
+	{ "Drag onto ../", "At the archive's top: extract into the folder holding it", false },
 	{ "SEARCH & VIEW", "", true },
 	{ "Ctrl + F", "Search this folder", false },
 	{ "Ctrl + Shift + F", "Search all subfolders (full path below)", false },
@@ -51,7 +58,7 @@ ui::Shortcut[45] shortcuts = {
 	{ "MOUSE", "", true },
 	{ "Single click", "Select a file or folder", false },
 	{ "Double click", "Open a file or folder", false },
-	{ "Right click a file", "Open, or open as sudo (asks for the password)", false },
+	{ "Right click a file", "Open, or open as sudo (asks for the password); archives: extract", false },
 	{ "Click ../", "Go to parent folder", false },
 	{ "Drag onto ../ or a place", "Move there; hold Ctrl to copy", false },
 	{ "Drag onto sidebar", "Drop folders on empty sidebar space to save them", false },
@@ -105,6 +112,10 @@ fn void draw()
 		ui::text_fit(prefs::trash
 			? "Delete moves items to the trash. Shift + Delete deletes permanently (asks first)."
 			: "Delete removes items permanently after a confirmation. Nothing goes to the trash.", x + 4, area.y + 44, width - 8, 14, ui::FG4);
+		if (ui::checkbox(x + 4, area.y + 84, "Open files inside archives", &prefs::archive_open)) prefs::dirty = true;
+		ui::text_fit(prefs::archive_open
+			? "Double-click extracts the file to a temporary folder and opens it. Temporary copies are deleted when sms closes."
+			: "Archives are view only: right-click and Extract files to open them.", x + 4, area.y + 120, width - 8, 14, ui::FG4);
 	}
 	else
 	{

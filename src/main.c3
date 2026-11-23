@@ -1,8 +1,8 @@
 module sms;
 import std::math, std::core::string, std::io, libc;
 import raylib6::rl;
-import bmu::ui, bmu::txt, bmu::sys, bmu::fileop, bmu::find;
-import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops, sms::complete;
+import bmu::ui, bmu::txt, bmu::sys, bmu::fileop, bmu::find, bmu::archive, bmu::picker;
+import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops, sms::complete, sms::arc;
 
 const int ID_PATH = 1;
 const int ID_SEARCH = 2;
@@ -53,6 +53,13 @@ bool drop_trash; // The current drag is over the sidebar's Trash row; reset ever
 Rect path_field; // the path bar, for drawing its completions on top of everything
 const int MENU_FILE = 1;
 int menu_entry = -1; // entry the file context menu is for
+const int PICK_EXTRACT = 1;
+const String ARCHIVE_LABEL = "Archive (read-only)";
+float archive_label_w; // measured once (UI scale changes keep logical widths)
+// "Extract to…": what goes once a folder is picked (the archive, a folder inside it, names; none = all).
+char[4096] pick_archive;
+char[4096] pick_inner;
+ops::Names pick_names;
 // What the pointer is over this frame, for drops from other apps (set while drawing; no copies).
 String hover_place; // sidebar place path (stable storage) or ""
 bool hover_place_trash;
@@ -179,7 +186,7 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace or -: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nArchives (zip, tar, 7z, rar, ...) open in sms unless an opener matches; right-click an archive: Browse, Extract here, Extract to.... Inside an archive (read-only) double-click opens a temporary copy.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace or -: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
@@ -194,11 +201,13 @@ fn int main(String[] args)
 	ui::zoom_shift_only = true;
 	defer ui::close();
 	defer preview::close();
+	defer arc::cleanup(); // after ops::close: no extraction into the temporary folder is running
 	defer ops::close();
 	defer size_job.close();
 	defer finder.close();
 	ui::app_args(args);
-	while (ui::running()) frame();
+	defer pick_names.free();
+	while (ui::running() && !arc::signalled) frame();
 	return 0;
 }
 
@@ -213,10 +222,11 @@ fn bool navigate(String path) => @pool()
 	sys::realpath(&resolved, p);
 	// Check before replacing the existing listing, so a failed navigation keeps it intact.
 	void* probe = sys::c_opendir(txt::z(&resolved));
-	if (!probe) return false;
+	if (!probe) return navigate_archive(p);
 	sys::c_closedir(probe);
 	int n = sys::list_dir(txt::view(&resolved), &entries, true);
 	if (n < 0) { entry_count = 0; return false; }
+	arc::leave();
 	entry_count = n;
 	clear_cut();
 	origin_entry = -1;
@@ -227,6 +237,124 @@ fn bool navigate(String path) => @pool()
 	txt::set(&search, "");
 	refilter();
 	return true;
+}
+
+<* A path through an archive file ("/x/a.zip/dir"): list that folder of the archive (memory, after one background read). *>
+fn bool navigate_archive(String p) => @pool()
+{
+	char[4096] file;
+	char[4096] inner;
+	if (!arc::locate(p, &file, &inner)) return false;
+	if (!arc::enter(txt::view(&file), txt::view(&inner))) return false;
+	show_archive();
+	return true;
+}
+
+<* (Re)build the listing from the archive index (empty while it is still being read). *>
+fn void show_archive()
+{
+	entry_count = arc::list(&entries);
+	clear_cut();
+	origin_entry = -1;
+	arc::display(&directory);
+	txt::set(&path_edit, txt::view(&directory));
+	searching = false;
+	stop_deep();
+	txt::set(&search, "");
+	refilter();
+	if (!arc::listed) txt::set(&status, "Reading archive…");
+}
+
+<* Once per frame: the archive index finished loading (list it) or failed (back to its folder). *>
+fn void poll_archive() => @pool()
+{
+	switch (arc::poll())
+	{
+		case 1:
+			show_archive();
+			if (arc::index.truncated) ui::toast("Some archive entries are not shown (limit or unsafe paths)", ui::YELLOW);
+		case 2:
+			String e = arc::index.error_text();
+			ui::toast(e.len ? string::tformat("Cannot read the archive: %s", e) : "Cannot read the archive", ui::RED);
+			String back = txt::dirname(txt::view(&arc::file)).tcopy();
+			arc::leave();
+			go(back);
+	}
+}
+
+fn String archive_parent() => txt::dirname(txt::view(&arc::file));
+
+<* Selected entries, or the right-clicked one when it is not part of the selection (temp). *>
+fn String[] menu_names()
+{
+	if (menu_entry >= 0 && menu_entry < entry_count)
+	{
+		for (int i = 0; i < visible_count; i++) if (visible[i] == menu_entry && marked[i]) return marked_names();
+		String[] one = mem::talloc_array(String, 1);
+		one[0] = txt::view(&entries[menu_entry].name);
+		return one;
+	}
+	return marked_names();
+}
+
+<* Inside an archive: extract `names` (none = the shown folder) next to the archive, or pick a folder first. *>
+fn void extract_shown(String[] names, bool pick) => @pool()
+{
+	String inner = txt::view(&arc::inner);
+	String[] list = names;
+	bool whole = !names.len && !inner.len;
+	if (!names.len && inner.len)
+	{
+		// Nothing selected in a folder: the folder itself.
+		list = mem::talloc_array(String, 1);
+		list[0] = txt::basename(inner);
+		inner = inner.contains("/") ? txt::dirname(inner) : "";
+	}
+	if (pick)
+	{
+		ask_extract_to(txt::view(&arc::file), inner, list);
+		return;
+	}
+	ops::extract(txt::view(&arc::file), inner, list, archive_parent(), whole);
+}
+
+fn void ask_extract_to(String archive_path, String inner, String[] names)
+{
+	if (!pick_names.set(archive_path, names)) { ui::toast("Too many items", ui::RED); return; }
+	txt::set(&pick_archive, archive_path);
+	txt::set(&pick_inner, inner);
+	picker::start(PICK_EXTRACT, DIR, "Extract to", arc::active ? archive_parent() : txt::view(&directory));
+}
+
+<* Double-click / Enter on a file inside an archive: extract a temporary copy and open it (setting). *>
+fn void open_in_archive(String name) => @pool()
+{
+	if (!prefs::archive_open) { ui::toast("Archives are view only (Ctrl+K, General): extract files to open them", ui::YELLOW); return; }
+	if (openers::rule_for(name) < 0) { ui::toast("No matching file opener. Configure one with Ctrl+K.", ui::RED); return; }
+	if (ops::busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return; }
+	String dir = arc::new_temp_dir();
+	if (!dir.len) { ui::toast("Cannot create a temporary folder", ui::RED); return; }
+	String[1] one = { name };
+	ops::extract(txt::view(&arc::file), txt::view(&arc::inner), &one, dir, false, txt::join(dir, name));
+}
+
+fn void read_only() => ui::toast("Archives are read-only: extract items first", ui::YELLOW);
+
+fn bool row_archive(sys::Entry* e) => archive::is_archive(txt::view(&e.name));
+
+<* Parent folder; leaving an archive's top level selects the archive in its folder. *>
+fn void go_parent() => @pool()
+{
+	String came = arc::active && txt::empty(&arc::inner) ? txt::basename(txt::view(&arc::file)).tcopy() : "";
+	go(txt::dirname(txt::view(&directory)));
+	if (!came.len || arc::active) return;
+	for (int i = 0; i < visible_count; i++)
+	{
+		if (txt::view(&entries[visible[i]].name) != came) continue;
+		select_only(i);
+		scroll = math::max(0.0f, (float)(i + 1) * ROW * (float)prefs::content_percent / 100 - 160);
+		return;
+	}
 }
 
 // Filter only on changes against the cached listing: no disk I/O or sorting.
@@ -379,7 +507,7 @@ fn void select_entry(int vi) => @pool()
 {
 	if (selected == vi) return;
 	selected = vi;
-	if (vi < 0 || entries[visible[vi]].dir) { preview::clear(); }
+	if (vi < 0 || entries[visible[vi]].dir || arc::active) { preview::clear(); }
 	else { preview::select(txt::join(txt::view(&directory), txt::view(&entries[visible[vi]].name))); }
 }
 
@@ -465,7 +593,7 @@ fn void deep_select(int i) => @pool()
 fn void deep_open(int i) => @pool()
 {
 	String path = deep_path(i);
-	if (finder.is_dir(i)) { go(path); }
+	if (finder.is_dir(i) || (openers::rule_for(finder.name(i)) < 0 && archive::is_archive(finder.name(i)))) { go(path); }
 	else { openers::launch(path); }
 }
 
@@ -569,7 +697,11 @@ fn void sidebar_location(Rect row, String path, String name, String icon, bool t
 		hover_place = path;
 		hover_place_trash = trash;
 		ui::panel(row, ui::BG1, 4);
-		if (dragging && path != txt::view(&directory))
+		if (dragging && arc::active)
+		{
+			// Never drop archive entries on the sidebar (no extract into places, no saved locations).
+		}
+		else if (dragging && path != txt::view(&directory))
 		{
 			// Dropping on Trash trashes (with .trashinfo); other places move/copy into the folder.
 			if (trash) { drop_trash = true; }
@@ -622,6 +754,28 @@ fn void compose_detail() => @pool()
 	{
 		txt::set(&info_detail, size.len ? string::tformat("%s · %s", txt::view(&info_counts), size) : txt::view(&info_counts));
 	}
+}
+
+<* One archive entry: type, size and modified time from the index (no disk I/O). *>
+fn void describe_archived(String name) => @pool()
+{
+	txt::set(&info_name, name);
+	int i = arc::find(name);
+	if (i < 0) { txt::set(&info_detail, "in the archive"); return; }
+	char[32] when;
+	libc::Tm tm;
+	Time_t mt = (Time_t)arc::index.mtime(i);
+	libc::localtime_r(&mt, &tm);
+	libc::strftime(&when, when.len, "%Y-%m-%d %H:%M", &tm);
+	String w = mt > 0 ? ((ZString)&when).str_view() : "unknown";
+	if (arc::index.is_dir(i)) { txt::set(&info_detail, string::tformat("Folder in the archive · modified %s", w)); return; }
+	String type = arc::index.is_link(i) ? "Link" : type_name(name, false);
+	long size = arc::index.size(i);
+	char[32] szt;
+	ops::size_text(&szt, (ulong)math::max(0L, size));
+	txt::set(&info_detail, size >= 0
+		? string::tformat("%s · %s · modified %s", type, txt::view(&szt), w)
+		: string::tformat("%s · modified %s", type, w));
 }
 
 <* One item: type, size (files), modified time from one lstat; folders get their size on S. *>
@@ -688,8 +842,22 @@ fn void update_info(bool trash_top) => @pool()
 		String d = info_dirs ? string::tformat("%d %s", info_dirs, info_dirs == 1 ? "folder" : "folders") : "";
 		String f = info_files ? string::tformat("%d %s", info_files, info_files == 1 ? "file" : "files") : "";
 		txt::set(&info_counts, d.len && f.len ? string::tformat("%s, %s", d, f) : d.len ? d : f);
+		if (arc::active)
+		{
+			// Sizes come from the archive index: one lookup per selected file, on selection change only.
+			ulong total;
+			for (int i = 0; i < visible_count; i++)
+			{
+				if (!marked[i] || entries[visible[i]].dir) continue;
+				int k = arc::find(txt::view(&entries[visible[i]].name));
+				if (k >= 0 && arc::index.size(k) > 0) total += (ulong)arc::index.size(k);
+			}
+			char[32] szt;
+			ops::size_text(&szt, total);
+			if (info_files) txt::set(&info_sizepart, info_dirs ? string::tformat("%s in files", txt::view(&szt)) : txt::view(&szt));
+		}
 		// Files are sized automatically (debounced); folders only on S.
-		if (info_files) { txt::set(&info_sizepart, "counting…"); size_due = ui::now + 0.25; }
+		else if (info_files) { txt::set(&info_sizepart, "counting…"); size_due = ui::now + 0.25; }
 		else { txt::set(&info_sizepart, "S for size"); }
 		compose_detail();
 	}
@@ -700,7 +868,8 @@ fn void update_info(bool trash_top) => @pool()
 		if (vi >= 0)
 		{
 			String name = txt::view(&entries[visible[vi]].name);
-			describe_single(txt::join(txt::view(&directory), name), name, trash_top ? visible[vi] : -1);
+			if (arc::active) { describe_archived(name); }
+			else { describe_single(txt::join(txt::view(&directory), name), name, trash_top ? visible[vi] : -1); }
 		}
 	}
 	info_name_w = ui::text_w(txt::view(&info_name), 16);
@@ -709,6 +878,7 @@ fn void update_info(bool trash_top) => @pool()
 <* S: size the selected folders too (recursive, background). *>
 fn void size_folders() => @pool()
 {
+	if (arc::active) return; // archive entries show their sizes from the index
 	if (!deep && marked_count == 0 && selected < 0)
 	{
 		size_current_folder();
@@ -789,11 +959,31 @@ fn void poll_selection_size() => @pool()
 <* Right-click menu for a file: Open (its opener) or Open as sudo (same command as root, asks for the password). *>
 fn void file_menu() => @pool()
 {
-	if (!ui::menu_begin(MENU_FILE, 230)) return;
+	if (!ui::menu_begin(MENU_FILE, 250)) return;
 	bool valid = menu_entry >= 0 && menu_entry < entry_count;
-	String path = valid ? txt::join(txt::view(&directory), txt::view(&entries[menu_entry].name)) : "";
+	String name = valid ? txt::view(&entries[menu_entry].name) : "";
+	String path = valid ? txt::join(txt::view(&directory), name) : "";
+	bool idle = !ops::busy();
+	if (arc::active)
+	{
+		// Inside an archive (read-only): open a temporary copy, or extract the selection.
+		bool file = valid && !entries[menu_entry].dir;
+		if (file && ui::menu_item("Open", ui::I_EXTERNAL, "Enter", prefs::archive_open && idle)) open_in_archive(name);
+		String parent = archive_parent();
+		if (ui::menu_item(string::tformat("Extract to %s", parent == "/" ? "/" : txt::basename(parent)), ui::I_FILE_ARCHIVE, "", valid && idle)) extract_shown(menu_names(), false);
+		if (ui::menu_item("Extract to…", ui::I_FOLDER_OPEN, "", valid && idle)) extract_shown(menu_names(), true);
+		ui::menu_end();
+		return;
+	}
 	if (ui::menu_item("Open", ui::I_EXTERNAL, "Enter", valid)) openers::launch(path);
 	if (ui::menu_item("Open as sudo", ui::I_LOCK, "", valid)) ops::ask_open_as_sudo(path);
+	if (valid && archive::is_archive(name))
+	{
+		ui::menu_sep();
+		if (ui::menu_item("Browse", ui::I_FOLDER_OPEN, "")) go(path);
+		if (ui::menu_item("Extract here", ui::I_FILE_ARCHIVE, "", idle)) ops::extract(path, "", {}, txt::view(&directory), true);
+		if (ui::menu_item("Extract to…", ui::I_FOLDER, "", idle)) ask_extract_to(path, "", {});
+	}
 	ui::menu_end();
 }
 
@@ -844,7 +1034,11 @@ fn void draw_sidebar(float h)
 	Rect bar = { 0, 60, SIDE_W, h - 88 };
 	ui::panel(bar, ui::BG_HARD);
 	ui::text("LOCATIONS", 16, 76, 15, ui::GRAY);
-	if (ui::icon_button({ SIDE_W - 42, 68, 30, 30 }, ui::I_PLUS, ui::FG4, "Add current folder (or drag a folder here)")) add_location(txt::view(&directory));
+	if (ui::icon_button({ SIDE_W - 42, 68, 30, 30 }, ui::I_PLUS, ui::FG4, "Add current folder (or drag a folder here)"))
+	{
+		if (arc::active) { ui::toast("A folder inside an archive can't be saved as a location", ui::YELLOW); }
+		else { add_location(txt::view(&directory)); }
+	}
 	sidebar_location({ 8, 104, SIDE_W - 16, 40 }, sys::home(), "Home", ui::I_HOME);
 	sidebar_location({ 8, 144, SIDE_W - 16, 40 }, "/", "File system", ui::I_HDD);
 	float extra = 0;
@@ -872,7 +1066,7 @@ fn void draw_sidebar(float h)
 	ui::scrollbar(area, sidebar_scroll, content);
 	if (remove >= 0) prefs::remove(remove);
 	// Folders dropped on free sidebar space are saved as locations.
-	if (dragging && drag_dirs && txt::empty(&drop_target) && !drop_trash && ui::point_in(rl::get_mouse_position(), bar)) ui::outline(bar, ui::AQUA, 0, 2);
+	if (dragging && drag_dirs && !arc::active && txt::empty(&drop_target) && !drop_trash && ui::point_in(rl::get_mouse_position(), bar)) ui::outline(bar, ui::AQUA, 0, 2);
 }
 
 fn void update_drag()
@@ -912,6 +1106,7 @@ fn void add_marked_locations() => @pool()
 // Returns false when no files are selected (folders only).
 fn bool launch_marked() => @pool()
 {
+	if (arc::active) { ui::toast("Open files from an archive one at a time, or extract them", ui::YELLOW); return true; }
 	String[] files = mem::talloc_array(String, (usz)marked_count);
 	int n;
 	for (int i = 0; i < visible_count && n < marked_count; i++) if (marked[i] && !entries[visible[i]].dir) files[n++] = txt::view(&entries[visible[i]].name);
@@ -931,6 +1126,12 @@ fn void drop_from_app() => @pool()
 	if (ui::top != 0 || !dropped.count) return;
 	String target;
 	if (hover_place.len) { target = hover_place; }
+	else if (arc::active)
+	{
+		// Only real folders take drops: the folder holding the archive (../ at its top) or a sidebar place.
+		if (!hover_parent_row || !txt::empty(&arc::inner)) { if (ui::point_in(rl::get_mouse_position(), list_rect)) read_only(); return; }
+		target = archive_parent();
+	}
 	else if (hover_parent_row) { target = txt::dirname(txt::view(&directory)); }
 	else if (hover_dir_entry >= 0) { target = txt::join(txt::view(&directory), txt::view(&entries[hover_dir_entry].name)); }
 	else if (ui::point_in(rl::get_mouse_position(), list_rect)) { target = txt::view(&directory); }
@@ -957,7 +1158,11 @@ fn void finish_drag(float h)
 	bool over_bar = prefs::sidebar && ui::point_in(rl::get_mouse_position(), bar);
 	if (pressed_entry >= 0 && rl::is_mouse_button_released(rl::RLMouseButton.LEFT))
 	{
-		if (dragging && ui::top == 0)
+		if (dragging && ui::top == 0 && arc::active)
+		{
+			if (!txt::empty(&drop_target)) ops::extract(txt::view(&arc::file), txt::view(&arc::inner), marked_names(), txt::view(&drop_target), false);
+		}
+		else if (dragging && ui::top == 0)
 		{
 			if (drop_trash) { ops::remove(txt::view(&directory), marked_names(), in_trash()); }
 			else if (!txt::empty(&drop_target)) { ops::transfer(txt::view(&directory), marked_names(), txt::view(&drop_target), ui::ctrl_down()); }
@@ -974,10 +1179,10 @@ fn void finish_drag(float h)
 		if (!txt::empty(&drop_target))
 		{
 			String target = txt::view(&drop_target);
-			hint = string::tformat("%s to %s", ui::ctrl_down() ? "Copy" : "Move", target == "/" ? "/" : txt::basename(target));
+			hint = string::tformat("%s to %s", arc::active ? "Extract" : ui::ctrl_down() ? "Copy" : "Move", target == "/" ? "/" : txt::basename(target));
 		}
 		else if (drop_trash) { hint = "Move to trash"; }
-		else if (over_bar && drag_dirs) { hint = drag_dirs == 1 ? "Save as location" : "Save as locations"; }
+		else if (over_bar && drag_dirs && !arc::active) { hint = drag_dirs == 1 ? "Save as location" : "Save as locations"; }
 		ui::panel({ mouse[0] + 14, mouse[1] + 14, 230, hint.len ? 60 : 42 }, ui::BG_HARD, 4);
 		bool single_dir = marked_count <= 1 && drag_dirs == 1;
 		ui::text(single_dir ? ui::I_FOLDER : ui::I_FILE, mouse[0] + 24, mouse[1] + 22, 23, single_dir ? ui::YELLOW : ui::GRAY);
@@ -989,9 +1194,17 @@ fn void finish_drag(float h)
 
 fn void frame() => @pool()
 {
-	ui::frame_begin(settings::open || ops::modal());
+	ui::frame_begin(settings::open || ops::modal() || picker::open);
 	ops::poll();
 	if (ops::take_refresh()) reload();
+	poll_archive();
+	int why;
+	String picked;
+	if (picker::take(&why, &picked) && why == PICK_EXTRACT)
+	{
+		// A whole archive gets the smart folder (no tarbomb in the chosen folder); chosen items land as they are.
+		ops::extract(txt::view(&pick_archive), txt::view(&pick_inner), pick_names.tview(), picked, pick_names.count == 0);
+	}
 	drop_target[0] = 0;
 	hover_place = "";
 	hover_place_trash = false;
@@ -1047,7 +1260,11 @@ fn void frame() => @pool()
 			if (here != "/") { txt::set(&path_edit, here); txt::append(&path_edit, "/"); }
 			ui::focus_on(ID_PATH, &path_edit);
 		}
-		if (ui::ctrl_down() && ui::letter('f')) start_search(ui::shift_down());
+		if (ui::ctrl_down() && ui::letter('f'))
+		{
+			if (ui::shift_down() && arc::active) ui::toast("Searching all subfolders isn't available inside archives: searching this folder", ui::YELLOW);
+			start_search(ui::shift_down() && !arc::active);
+		}
 	}
 	if (ui::top == 0 && ui::focus < 0)
 	{
@@ -1063,11 +1280,17 @@ fn void frame() => @pool()
 			prefs::sidebar = !prefs::sidebar;
 			prefs::dirty = true;
 		}
-		if (rl::is_key_pressed(rl::RLKeyboardKey.BACKSPACE)) go(txt::dirname(txt::view(&directory)));
+		if (rl::is_key_pressed(rl::RLKeyboardKey.BACKSPACE)) go_parent();
 		// Plain "-" (layout-aware, or keypad minus) also goes up; Ctrl+- stays content zoom.
 		bool minus = rl::is_key_pressed((rl::RLKeyboardKey)ui::minus_key) || rl::is_key_pressed(rl::RLKeyboardKey.KP_SUBTRACT);
-		if (minus && !ui::ctrl_down() && !ui::shift_down()) go(txt::dirname(txt::view(&directory)));
-		if (rl::is_key_pressed(rl::RLKeyboardKey.F5)) go(txt::view(&directory));
+		if (minus && !ui::ctrl_down() && !ui::shift_down()) go_parent();
+		if (rl::is_key_pressed(rl::RLKeyboardKey.F5))
+		{
+			if (arc::active) { arc::reread(); show_archive(); }
+			else { go(txt::view(&directory)); }
+		}
+		// Escape while an archive is still being read: back to its folder.
+		if (arc::active && !arc::listed && rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) go(archive_parent());
 		if (!ui::ctrl_down() && ui::letter('s') && !deep) size_folders();
 		if (ui::ctrl_down() && ui::letter('a') && visible_count && !deep)
 		{
@@ -1076,7 +1299,12 @@ fn void frame() => @pool()
 			if (anchor < 0) anchor = selected;
 		}
 		if (!was_pressing && !searching && rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { clear_marks(); anchor = -1; collapse_row = -1; }
-		if (ui::ctrl_down() && (ui::letter('c') || ui::letter('x')) && marked_count && !deep)
+		if (arc::active && ui::ctrl_down() && ui::letter('x') && marked_count) { read_only(); }
+		else if (arc::active && ui::ctrl_down() && ui::letter('c') && marked_count)
+		{
+			ops::set_archive_clipboard(txt::view(&arc::file), txt::view(&arc::inner), marked_names());
+		}
+		else if (ui::ctrl_down() && (ui::letter('c') || ui::letter('x')) && marked_count && !deep)
 		{
 			bool cut = ui::letter('x');
 			clear_cut();
@@ -1089,13 +1317,15 @@ fn void frame() => @pool()
 		}
 		if (ui::ctrl_down() && ui::letter('v'))
 		{
-			if (ops::has_clip()) { ops::paste(txt::view(&directory)); }
+			if (arc::active) { read_only(); }
+			else if (ops::has_clip()) { ops::paste(txt::view(&directory)); }
 			else { ui::toast("Nothing to paste: copy (Ctrl+C) or cut (Ctrl+X) first", ui::YELLOW); }
 		}
-		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count && !deep) ops::remove(txt::view(&directory), marked_names(), ui::shift_down() || in_trash());
+		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count && arc::active) { read_only(); }
+		else if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count && !deep) { ops::remove(txt::view(&directory), marked_names(), ui::shift_down() || in_trash()); }
 	}
 	ui::panel({ 0, 0, w, 60 }, ui::BG_HARD);
-	if (ui::icon_button({ 12, 12, 36, 36 }, ui::I_UP, ui::FG4, "Parent folder (Backspace)")) go(txt::dirname(txt::view(&directory)));
+	if (ui::icon_button({ 12, 12, 36, 36 }, ui::I_UP, ui::FG4, "Parent folder (Backspace)")) go_parent();
 	if (ui::icon_button({ 52, 12, 36, 36 }, ui::I_HOME, ui::FG4, "Home")) go(sys::home());
 	bool submitted;
 	if (searching)
@@ -1164,8 +1394,8 @@ fn void frame() => @pool()
 	float ops_h = ops::panel_height();
 	float main_h = h - 104 - (ops_h > 0 ? ops_h + 8 : 0);
 	// Trash top level: a slim bar with Restore above the list.
-	bool trash_top = txt::view(&directory) == txt::view(&trash_files);
-	float bar_h = trash_top ? 48.0f : 0.0f;
+	bool trash_top = !arc::active && txt::view(&directory) == txt::view(&trash_files);
+	float bar_h = trash_top || arc::active ? 48.0f : 0.0f;
 	float list_w = w - left - 8 - (show_preview ? preview_w + 8 : 0);
 	if (trash_top)
 	{
@@ -1177,6 +1407,27 @@ fn void frame() => @pool()
 		{
 			ops::restore(txt::view(&directory), marked_names());
 		}
+	}
+	else if (arc::active)
+	{
+		// Archive: read-only notice with Extract (selection, or this folder / the whole archive) and Extract to….
+		Rect tb = { left, 68, list_w - 10, 40 };
+		ui::panel(tb, ui::BG_HARD, 6);
+		ui::text(ui::I_FILE_ARCHIVE, tb.x + 12, tb.y + 10, 18, ui::AQUA);
+		bool can = arc::listed && !ops::busy();
+		String label = marked_count ? "Extract selected" : txt::empty(&arc::inner) ? "Extract all" : "Extract folder";
+		float bw = 150;
+		// "Archive (read-only)" then the archive's name; the label width is measured once.
+		if (archive_label_w <= 0) archive_label_w = ui::text_w(ARCHIVE_LABEL, 16) + 12;
+		float room = math::max(0.0f, tb.width - 40 - bw * 2 - 32);
+		ui::text_fit(ARCHIVE_LABEL, tb.x + 40, tb.y + 11, room, 16, ui::GRAY);
+		ui::text_fit(txt::basename(txt::view(&arc::file)), tb.x + 40 + archive_label_w, tb.y + 11, math::max(0.0f, room - archive_label_w), 16, ui::FG);
+		if (ui::button({ tb.x + tb.width - bw * 2 - 16, tb.y + 4, bw, 32 }, "Extract to…", NORMAL, ui::I_FOLDER_OPEN, can)) extract_shown(marked_names(), true);
+		if (ui::button({ tb.x + tb.width - bw - 8, tb.y + 4, bw, 32 }, label, PRIMARY, ui::I_DOWNLOAD, can))
+		{
+			extract_shown(marked_names(), false);
+		}
+		if (ui::hover({ tb.x, tb.y, tb.width - bw * 2 - 24, tb.height })) ui::tooltip("Read-only archive. Extract puts items next to the archive; several top-level items go into a folder named after it.");
 	}
 	Rect list = { left, 68 + bar_h, list_w, main_h - bar_h };
 	list_rect = list;
@@ -1268,9 +1519,10 @@ fn void frame() => @pool()
 				if (selected == -2) { ui::panel(row, ui::BG2, 4); }
 				else if (hovered) { ui::panel(row, ui::BG1, 4); }
 				if (hovered) hover_parent_row = true;
-				if (dragging && hovered)
+				// Inside an archive only its top level's ../ is a real folder (the one holding the archive).
+				if (dragging && hovered && (!arc::active || txt::empty(&arc::inner)))
 				{
-					txt::set(&drop_target, txt::dirname(txt::view(&directory)));
+					txt::set(&drop_target, arc::active ? archive_parent() : txt::dirname(txt::view(&directory)));
 					ui::outline(row, ui::AQUA, 4, 2);
 				}
 				ui::text(ui::I_FOLDER, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, ui::BG4);
@@ -1285,20 +1537,20 @@ fn void frame() => @pool()
 			if (selected == vi && (marked_count > 1 || !marked[vi])) ui::outline(row, ui::BG4, 4);
 			if (hovered && entry.dir) hover_dir_entry = visible[vi];
 			// Right-click on a file: select it (keep a selection it belongs to) and offer Open / Open as sudo.
-			if (!entry.dir && ui::right_clicked(row))
+			if ((!entry.dir || arc::active) && ui::right_clicked(row))
 			{
 				if (!marked[vi]) select_only(vi);
 				menu_entry = visible[vi];
 				ui::menu_open(MENU_FILE);
 			}
-			bool drop_here = dragging && hovered && entry.dir && !marked[vi];
+			bool drop_here = dragging && hovered && entry.dir && !marked[vi] && !arc::active;
 			if (drop_here)
 			{
 				txt::set(&drop_target, txt::join(txt::view(&directory), txt::view(&entry.name)));
 				ui::outline(row, ui::AQUA, 4, 2);
 			}
 			bool dim = dim_cut && cut_entry[visible[vi]];
-			ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
+			ui::text(entry.dir ? ui::I_FOLDER : row_archive(entry) ? ui::I_FILE_ARCHIVE : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
 			ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, dim ? ui::GRAY : ui::FG);
 			if (clicked)
 			{
@@ -1348,7 +1600,7 @@ fn void frame() => @pool()
 			// Activate only after a completed double-click, never after a drag.
 			if (activated && !dragging) enter = visible[vi];
 		}
-		if (!visible_count) ui::text(txt::empty(&search) ? "Empty folder" : "No matching files", list.x + 16 * content_scale, list.y + (float)parent_rows * row_h + 16 * content_scale, text_size, ui::GRAY);
+		if (!visible_count) ui::text(arc::active && !arc::listed ? txt::view(&arc::loading_text) : txt::empty(&search) ? "Empty folder" : "No matching files", list.x + 16 * content_scale, list.y + (float)parent_rows * row_h + 16 * content_scale, text_size, ui::GRAY);
 		// A press on empty list space clears the selection (unless Ctrl/Shift) and may start a selection box.
 		if (ui::clicked(list))
 		{
@@ -1360,12 +1612,16 @@ fn void frame() => @pool()
 		ui::end_clip();
 		ui::scrollbar(list, scroll, content);
 		// Navigate after drawing: do not mutate the entry array during iteration.
-		if (go_up) { go(txt::dirname(txt::view(&directory))); }
+		if (go_up) { go_parent(); }
 		else if (multi_enter && launch_marked()) {}
 		else if (enter >= 0)
 		{
-			String path = txt::join(txt::view(&directory), txt::view(&entries[enter].name));
+			String name = txt::view(&entries[enter].name);
+			String path = txt::join(txt::view(&directory), name);
 			if (entries[enter].dir) { go(path); }
+			else if (arc::active) { open_in_archive(name); }
+			// Archives: an opener rule wins; without one sms browses the archive.
+			else if (openers::rule_for(name) < 0 && archive::is_archive(name)) { go(path); }
 			else { openers::launch(path); }
 		}
 	}
@@ -1394,5 +1650,11 @@ fn void frame() => @pool()
 	file_menu();
 	settings::draw();
 	ops::draw_dialogs();
+	if (picker::open)
+	{
+		ui::layer = 1;
+		picker::draw();
+		ui::layer = 0;
+	}
 	ui::frame_end();
 }

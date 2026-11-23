@@ -85,6 +85,12 @@ fileop::State count_state_shown;
 fileop::Progress cur;          // snapshot of this frame
 Names clip;
 bool clip_cut;
+bool clip_archive;             // clip.dir is an archive file; Ctrl+V extracts the names from folder clip_inner of it
+char[4096] clip_inner;
+// EXTRACT parameters for begin() (set by extract()).
+char[4096] ext_inner;
+bool ext_smart;
+char[4096] open_after;         // a temporary copy to open with its opener once extracted
 Names pending;                 // waiting for the delete confirmation
 // The running request, kept for "Retry as administrator" after a permission error.
 Names req;
@@ -165,7 +171,10 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 {
 	if (job.busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return false; }
 	bool elevated = password.ptr != null;
-	bool ok = elevated ? job.start_elevated(kind, src_dir, names, dst_dir, password, fallback) : job.start(kind, src_dir, names, dst_dir, fallback);
+	bool ok;
+	if (kind == EXTRACT) { ok = job.extract(src_dir, txt::view(&ext_inner), names, dst_dir, ext_smart); }
+	else if (elevated) { ok = job.start_elevated(kind, src_dir, names, dst_dir, password, fallback); }
+	else { ok = job.start(kind, src_dir, names, dst_dir, fallback); }
 	if (!ok) { ui::toast("Could not start the file operation", ui::RED); return false; }
 	// Remember the request for a retry as administrator (names may point into the listing).
 	if (!elevated) req.set(src_dir, names);
@@ -182,7 +191,9 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 	sample_bytes = 0;
 	speed = 0;
 	apply_all = false;
+	if (kind != EXTRACT) open_after[0] = 0;
 	String what = names.len == 1 ? string::tformat("\"%s\"", names[0]) : string::tformat("%d items", names.len);
+	if (kind == EXTRACT && !names.len) { what = string::tformat("\"%s\"", txt::basename(src_dir)); job_items = 1; }
 	switch (kind)
 	{
 		case COPY: txt::set(&title, string::tformat("Copying %s to %s", what, txt::view(&job_target)));
@@ -191,6 +202,7 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 		case DELETE: txt::set(&title, string::tformat("Deleting %s", what));
 		case COUNT: txt::set(&title, string::tformat("Counting %s", what));
 		case RESTORE: txt::set(&title, string::tformat("Restoring %s", what));
+		case EXTRACT: txt::set(&title, string::tformat(open_after[0] ? "Extracting %s to open it" : "Extracting %s to %s", what, txt::view(&job_target)));
 	}
 	if (elevated) txt::append(&title, " as sudo");
 	txt::set(&detail, "Preparing…");
@@ -204,17 +216,44 @@ fn void restore(String trash_files, String[] names)
 	if (names.len) begin(RESTORE, trash_files, names);
 }
 
+<*
+ Extract `names` (direct children of folder `inner` of archive `archive_path`; none = all of it) into `dst`.
+ `smart`: several top-level items go into a folder named after the archive. With `open_path`, the file is
+ opened with its opener once extracted (a temporary copy) instead of a "done" toast.
+*>
+fn void extract(String archive_path, String inner, String[] names, String dst, bool smart, String open_path = "")
+{
+	if (job.busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return; }
+	txt::set(&ext_inner, inner);
+	ext_smart = smart;
+	txt::set(&open_after, open_path);
+	if (!begin(EXTRACT, archive_path, names, dst)) open_after[0] = 0;
+}
+
 fn void set_clipboard(String dir, String[] names, bool cut) => @pool()
 {
 	if (!names.len) return;
 	if (!clip.set(dir, names)) { ui::toast("Too many items for the clipboard", ui::RED); return; }
 	clip_cut = cut;
+	clip_archive = false;
 	ui::toast(string::tformat("%s %d %s", cut ? "Cut" : "Copied", names.len, plural((int)names.len, "item", "items")));
+}
+
+<* Ctrl+C inside an archive: Ctrl+V in a folder extracts these entries there. *>
+fn void set_archive_clipboard(String archive_path, String inner, String[] names) => @pool()
+{
+	if (!names.len) return;
+	if (!clip.set(archive_path, names)) { ui::toast("Too many items for the clipboard", ui::RED); return; }
+	clip_cut = false;
+	clip_archive = true;
+	txt::set(&clip_inner, inner);
+	ui::toast(string::tformat("Copied %d %s from the archive", names.len, plural((int)names.len, "item", "items")));
 }
 
 fn void paste(String dst) => @pool()
 {
 	if (!clip.count) return;
+	if (clip_archive) { extract(txt::view(&clip.dir), txt::view(&clip_inner), clip.tview(), dst, false); return; }
 	if (clip_cut && txt::view(&clip.dir) == dst) return; // moving into the same folder changes nothing
 	if (begin(clip_cut ? MOVE : COPY, txt::view(&clip.dir), clip.tview(), dst)) job_clears_clip = clip_cut;
 }
@@ -262,7 +301,7 @@ fn void poll() => @pool()
 	if (job.finished(&done))
 	{
 		cur = done;
-		refresh = true;
+		refresh = !(job_kind == EXTRACT && open_after[0]); // a temporary copy changes no shown folder
 		size_dirty = true;
 		finished(&done);
 	}
@@ -290,15 +329,21 @@ fn void finished(fileop::Progress* p) => @pool()
 				case TRASH: ui::toast(string::tformat("Moved %s to the trash", what), ui::GREEN);
 				case DELETE: ui::toast(string::tformat("Deleted %s", what), ui::GREEN);
 				case RESTORE: ui::toast(string::tformat("Restored %s%s", what, skipped), ui::GREEN);
+				case EXTRACT:
+					if (open_after[0])
+					{
+						if (openers::launch(txt::view(&open_after))) ui::toast("Opened a temporary copy (deleted when sms closes)");
+					}
+					else { ui::toast(string::tformat("Extracted %s%s", what, skipped), ui::GREEN); }
 				case COUNT: break;
 			}
 		case CANCELLED:
-			ui::toast(job_kind == COPY || job_kind == MOVE ? "Cancelled: nothing was changed" : "Cancelled", ui::YELLOW);
+			ui::toast(job_kind == COPY || job_kind == MOVE || job_kind == EXTRACT ? "Cancelled: nothing was changed" : "Cancelled", ui::YELLOW);
 		default:
 			// Permission denied: offer the same operation as administrator (not for restore / sizing).
 			bool denied = p.err == 13 || p.err == 1;
 			bool wrong_pw = req_elevated && txt::view(&p.error) == "Wrong password";
-			if ((denied && !req_elevated && job_kind != RESTORE && job_kind != COUNT) || wrong_pw)
+			if ((denied && !req_elevated && job_kind != RESTORE && job_kind != COUNT && job_kind != EXTRACT) || wrong_pw)
 			{
 				admin_delete = req_kind == TRASH || req_kind == DELETE;
 				admin_for_open = false;
@@ -484,7 +529,7 @@ fn void draw_panel(Rect r)
 	ui::outline(r, ui::BG2, 6);
 	float x = r.x + 14;
 	float w = r.width - 28;
-	String icon = job_kind == TRASH || job_kind == DELETE ? ui::I_TRASH : job_kind == MOVE ? ui::I_CUT : job_kind == RESTORE ? ui::I_UNDO : ui::I_COPY;
+	String icon = job_kind == TRASH || job_kind == DELETE ? ui::I_TRASH : job_kind == MOVE ? ui::I_CUT : job_kind == RESTORE ? ui::I_UNDO : job_kind == EXTRACT ? ui::I_FILE_ARCHIVE : ui::I_COPY;
 	ui::text(icon, x, r.y + 12, 18, ui::AQUA);
 	ui::text_fit(txt::view(&title), x + 28, r.y + 13, w - 76, 16, ui::FG);
 	bool can = cur.can_cancel;
@@ -520,7 +565,7 @@ fn void draw_dialogs() => @pool()
 	{
 		Rect box = ui::dialog(520, 210);
 		bool keep = ui::dialog_header(box, ui::I_WARN, "A file operation is running") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
-		bool undo = job_kind == COPY || job_kind == MOVE;
+		bool undo = job_kind == COPY || job_kind == MOVE || job_kind == EXTRACT;
 		ui::text_fit(txt::view(&title), box.x + 20, box.y + 62, box.width - 40, 15, ui::FG);
 		ui::text_fit(undo ? "Quitting cancels it and rolls it back: nothing is lost." : "Quitting stops it; items already removed stay removed.", box.x + 20, box.y + 90, box.width - 40, 14, ui::FG4);
 		if (ui::button({ box.x + 20, box.y + 140, 200, 40 }, "Keep running", PRIMARY)) keep = true;
