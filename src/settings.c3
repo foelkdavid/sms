@@ -3,6 +3,7 @@ import std::math;
 import raylib6::rl;
 import bmu::ui, bmu::txt;
 import sms::openers, sms::prefs;
+import std::core::string, std::io, bmu::sys, bmu::fileop;
 
 bool open;
 int tab;
@@ -60,6 +61,45 @@ Shortcut[41] shortcuts = {
 	{ "Close window", "Asks first while a file operation runs", false }
 };
 
+// About tab: facts about this binary, collected once when the tab opens (never per frame).
+const int ABOUT_ROWS = 11;
+char[32][ABOUT_ROWS] about_key;
+char[512][ABOUT_ROWS] about_value;
+int about_count;
+bool about_ready;
+
+fn void about_row(String key, String value)
+{
+	if (about_count >= ABOUT_ROWS) return;
+	txt::set(&about_key[about_count], key);
+	txt::set(&about_value[about_count], value);
+	about_count++;
+}
+
+extern fn sz readlink(ZString path, char* buf, usz size) @cname("readlink");
+
+fn void collect_about() => @pool()
+{
+	about_count = 0;
+	about_row("Version", string::tformat("sms %s", env::PROJECT_VERSION));
+	about_row("Display", string::tformat("%s (native)", ui::backend()));
+	about_row("GLFW", ui::glfw_version());
+	about_row("raylib", "6.0 (static, bundled with bmu)");
+	about_row("GPU", ui::gpu());
+	about_row("OpenGL", ui::gl_version());
+	int m = 0;
+	about_row("Monitor", string::tformat("%s · %d × %d @ %d Hz", rl::get_monitor_name(m).str_view(), rl::get_monitor_width(m), rl::get_monitor_height(m), rl::get_monitor_refresh_rate(m)));
+	about_row("Scale", string::tformat("interface %d%% · file list %d%%", (int)(ui::scale * 100 + 0.5f), prefs::content_percent));
+	char[4096] exe;
+	sz n = readlink("/proc/self/exe", &exe, exe.len - 1);
+	about_row("Binary", n > 0 ? (String)exe[:(usz)n] : "unknown");
+	about_row("Settings", txt::view(&prefs::config_dir));
+	char[4096] trash;
+	fileop::trash_dir(&trash);
+	about_row("Trash", prefs::trash ? txt::view(&trash) : "disabled (Delete is permanent)");
+	about_ready = true;
+}
+
 fn void toggle()
 {
 	open = !open;
@@ -76,10 +116,11 @@ fn void draw()
 	float x = box.x + 16;
 	float width = box.width - 32;
 	float y = box.y + 54;
-	float tab_w = (width - 16) / 3;
-	if (ui::button({ x, y, tab_w, 36 }, "Keyboard shortcuts", tab == 0 ? PRIMARY : NORMAL)) { tab = 0; ui::unfocus(); }
+	float tab_w = (width - 24) / 4;
+	if (ui::button({ x, y, tab_w, 36 }, "Shortcuts", tab == 0 ? PRIMARY : NORMAL)) { tab = 0; ui::unfocus(); }
 	if (ui::button({ x + tab_w + 8, y, tab_w, 36 }, "File openers", tab == 1 ? PRIMARY : NORMAL)) { tab = 1; ui::unfocus(); }
 	if (ui::button({ x + (tab_w + 8) * 2, y, tab_w, 36 }, "General", tab == 2 ? PRIMARY : NORMAL)) { tab = 2; ui::unfocus(); }
+	if (ui::button({ x + (tab_w + 8) * 3, y, tab_w, 36 }, "About", tab == 3 ? PRIMARY : NORMAL)) { tab = 3; ui::unfocus(); about_ready = false; }
 	Rect area = { x, y + 48, width, box.height - 118 };
 	if (tab == 0)
 	{
@@ -107,6 +148,18 @@ fn void draw()
 		}
 		ui::end_clip();
 		ui::scrollbar(area, shortcuts_scroll, content);
+	}
+	else if (tab == 3)
+	{
+		if (!about_ready) collect_about();
+		float key_w = 110;
+		for (int i = 0; i < about_count; i++)
+		{
+			float row_y = area.y + 8 + (float)i * 34;
+			if (row_y + 30 > area.y + area.height) break;
+			ui::text(txt::view(&about_key[i]), x + 8, row_y + 8, 14, ui::FG4);
+			ui::text_tail(txt::view(&about_value[i]), x + 8 + key_w, row_y + 7, width - key_w - 16, 15, ui::FG);
+		}
 	}
 	else if (tab == 2)
 	{
