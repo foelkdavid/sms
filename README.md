@@ -55,6 +55,8 @@ Limits: 16 rules, 255 bytes per comma-separated pattern list, 1023 bytes per exe
 
 ## Install / uninstall (Linux)
 
+sms needs a **Wayland** session (it has no X11/XWayland support; the last X11 build is the `xwayland` branch).
+
 C3 0.8.x has no literal `c3c install` or `c3c uninstall` command; use these project targets (requires Python 3):
 
 ```sh
@@ -100,9 +102,9 @@ Current boundaries: directory reads are synchronous on navigation, with a visibl
 
 `python3 tests/install.py` builds and checks installation, the generated desktop launcher, bundled license notices, and repeatable uninstall. It uses temporary home/config/data directories and verifies that uninstall preserves settings and unrelated files (requires Python 3 and C3; no display needed).
 
-`python3 tests/preview.py` checks image selection, aspect ratios, transparency, stale-result replacement, errors,
-limits, and clearing on navigation/non-image selection (requires visible X11/XTest and Pillow; Hyprland uses
-`hyprctl` for pointer placement). Tests locate their own process window, not an already-running sms window.
+sms is Wayland-only (no X11/XWayland). The former X11/XTest UI tests (`preview.py`, `settings.py`, `zoom.py`) can't
+drive a Wayland window and were removed; they remain on the frozen `xwayland` branch. Wayland UI automation (via the
+compositor's virtual pointer/keyboard protocols) is not set up yet: check UI changes with `--shot` and by hand.
 
 Headless opener checks (use a temporary directory):
 
@@ -112,10 +114,6 @@ tmp=$(mktemp -d)
 XDG_CONFIG_HOME="$tmp" /tmp/sms-openers-check "$tmp/sms"
 rm -rf "$tmp"
 ```
-
-`python3 tests/settings.py` checks default opener creation, config persistence, first-match launching, literal filename arguments, modal keyboard isolation, and malformed configs under a temporary `XDG_CONFIG_HOME` (requires an unlocked X11 display and XTest). It saves settings screenshots under `/tmp/sms-settings-*.png`.
-
-`python3 tests/zoom.py` checks zoom shortcuts, independent scales, persistence, resets, and malformed settings under a temporary `XDG_CONFIG_HOME` (requires a visible X11 display and XTest).
 
 ```sh
 ./build/sms --help
