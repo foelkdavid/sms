@@ -41,7 +41,7 @@ Shortcut[41] shortcuts = {
 	{ "SEARCH & VIEW", "", true },
 	{ "Ctrl + F", "Search this folder", false },
 	{ "Ctrl + Shift + F", "Search all subfolders (full path below)", false },
-	{ "Enter in search", "Keep filter and focus file list", false },
+	{ "Enter / Tab in search", "Keep results, select the first one", false },
 	{ "Ctrl + H", "Show / hide hidden files", false },
 	{ "Ctrl + S", "Show / hide sidebar", false },
 	{ "Escape", "Clear search, cancel drag, close settings", false },

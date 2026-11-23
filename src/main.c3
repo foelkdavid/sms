@@ -26,6 +26,7 @@ int deep_click = -1;
 double deep_click_time;
 int deep_shown = -1; // results count / state the status text was built for
 bool deep_shown_busy;
+bool deep_pick; // Enter/Tab in the search box: select the first result as soon as one exists
 sys::Entry[MAX_ENTRIES] entries;
 int entry_count;
 int[MAX_ENTRIES] visible;
@@ -379,6 +380,24 @@ fn void stop_deep()
 	deep_scroll = 0;
 	deep_click = -1;
 	deep_shown = -1;
+	deep_pick = false;
+}
+
+<* Enter / Tab in the search box: leave it and select the first row (recursive: the first result, possibly later). *>
+fn void pick_first()
+{
+	ui::unfocus();
+	if (deep)
+	{
+		if (deep_due > 0) deep_due = ui::now; // run a pending search now
+		deep_pick = true;
+		return;
+	}
+	if (visible_count)
+	{
+		select_only(0);
+		scroll = 0;
+	}
 }
 
 <* Enter recursive search (Ctrl+Shift+F) or switch back to filtering this folder (Ctrl+F). *>
@@ -451,6 +470,13 @@ fn void draw_deep(Rect list, float row_h, float icon_size, float text_size, floa
 	}
 	status_for_deep();
 	int n = finder.results();
+	if (deep_pick && n > 0)
+	{
+		deep_pick = false;
+		deep_select(0);
+		deep_scroll = 0;
+	}
+	else if (deep_pick && deep_due == 0 && !finder.searching()) { deep_pick = false; }
 	int open = -1;
 	if (keys && n > 0)
 	{
@@ -1026,12 +1052,17 @@ fn void frame() => @pool()
 	bool submitted;
 	if (searching)
 	{
+		bool tabbed = ui::focused(ID_SEARCH) && rl::is_key_pressed(rl::RLKeyboardKey.TAB);
 		if (ui::input(ID_SEARCH, { 100, 12, w - 192, 36 }, &search, deep ? "Search all subfolders" : "Search this folder", &submitted, ui::I_SEARCH))
 		{
-			if (deep) { deep_due = ui::now + 0.15; deep_shown = -1; }
+			if (deep) { deep_due = ui::now + 0.15; deep_shown = -1; deep_pick = false; }
 			else { refilter(); }
 		}
-		if (submitted) ui::unfocus();
+		if (submitted || tabbed)
+		{
+			submitted = true; // keeps this Enter from also opening the row
+			pick_first();
+		}
 	}
 	else
 	{
