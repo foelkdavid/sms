@@ -1,7 +1,7 @@
 module sms;
 import std::math, std::core::string, std::io, libc;
 import raylib6::rl;
-import bmu::ui, bmu::txt, bmu::sys, bmu::fileop, bmu::find, bmu::archive, bmu::picker;
+import bmu::ui, bmu::txt, bmu::sys, bmu::fileop, bmu::find, bmu::archive, bmu::picker, bmu::places;
 import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops, sms::complete, sms::arc;
 
 const int ID_PATH = 1;
@@ -193,6 +193,7 @@ fn int main(String[] args)
 		}
 	}
 	prefs::load();
+	sync_places();
 	resolve_trash();
 	openers::load();
 	defer { if (!prefs::save()) io::eprintfn("sms: could not save settings"); }
@@ -683,9 +684,28 @@ fn void go(String path)
 	else { ui::toast("Cannot read this folder", ui::RED); }
 }
 
+char[4096] downloads_dir; // ~/Downloads resolved like navigate(); empty when it does not exist (checked at startup)
+
+<* The sidebar lives in bmu::places so the apps' pickers show the same one. First run: migrate old `place=` lines;
+   the Trash entry follows the trash setting. One small read at startup, a write only when something changed. *>
+fn void sync_places() => @pool()
+{
+	bool had = places::load();
+	bool changed = !had;
+	if (!had)
+	{
+		for (int i = 0; i < prefs::place_count && places::count < places::MAX; i++) places::list[places::count++] = { .path = prefs::places[i].path };
+		if (prefs::place_count) prefs::dirty = true; // rewrite settings without the old lines
+	}
+	if (places::trash != prefs::trash) { places::trash = prefs::trash; changed = true; }
+	if (changed) places::save();
+	String d = places::downloads_path();
+	if (sys::is_dir(d)) sys::realpath(&downloads_dir, d);
+}
+
 fn void add_location(String path)
 {
-	if (!prefs::add(path)) ui::toast("Cannot add location (limit: 32; no newlines in paths)", ui::RED);
+	if (!places::add(path)) ui::toast("Cannot add location (limit: 32; no newlines in paths)", ui::RED);
 }
 
 // App-specific location rows: icons and labels share the same left edge.
@@ -1039,32 +1059,40 @@ fn void draw_sidebar(float h)
 		if (arc::active) { ui::toast("A folder inside an archive can't be saved as a location", ui::YELLOW); }
 		else { add_location(txt::view(&directory)); }
 	}
-	sidebar_location({ 8, 104, SIDE_W - 16, 40 }, sys::home(), "Home", ui::I_HOME);
-	sidebar_location({ 8, 144, SIDE_W - 16, 40 }, "/", "File system", ui::I_HDD);
-	float extra = 0;
+	float ry = 104;
+	sidebar_location({ 8, ry, SIDE_W - 16, 40 }, sys::home(), "Home", ui::I_HOME);
+	ry += 40;
+	if (places::downloads && !txt::empty(&downloads_dir))
+	{
+		sidebar_location({ 8, ry, SIDE_W - 16, 40 }, txt::view(&downloads_dir), "Downloads", ui::I_DOWNLOAD);
+		ry += 40;
+	}
+	sidebar_location({ 8, ry, SIDE_W - 16, 40 }, "/", "File system", ui::I_HDD);
+	ry += 40;
 	if (prefs::trash)
 	{
-		sidebar_location({ 8, 184, SIDE_W - 16, 40 }, txt::view(&trash_files), "Trash", ui::I_TRASH, true, txt::view(&ops::trash_size));
-		extra = 40;
+		sidebar_location({ 8, ry, SIDE_W - 16, 40 }, txt::view(&trash_files), "Trash", ui::I_TRASH, true, txt::view(&ops::trash_size));
+		ry += 40;
 	}
+	float extra = ry - 184;
 	ui::hline(12, 192 + extra, SIDE_W - 24);
 	Rect area = { 8, 204 + extra, SIDE_W - 16, h - 240 - extra };
-	float content = (float)prefs::place_count * SIDE_ROW;
+	float content = (float)places::count * SIDE_ROW;
 	sidebar_scroll = ui::scroll_wheel(area, sidebar_scroll, content);
 	ui::begin_clip(area);
 	int first = math::max(0, (int)(sidebar_scroll / SIDE_ROW));
-	int end = math::min(prefs::place_count, first + (int)(area.height / SIDE_ROW) + 2);
+	int end = math::min(places::count, first + (int)(area.height / SIDE_ROW) + 2);
 	int remove = -1;
 	for (int i = first; i < end; i++)
 	{
 		float y = area.y + (float)i * SIDE_ROW - sidebar_scroll;
-		String path = txt::view(&prefs::places[i].path);
+		String path = places::path(i);
 		sidebar_location({ 8, y, SIDE_W - 48, SIDE_ROW - 2 }, path, path == "/" ? "/" : txt::basename(path), ui::I_FOLDER);
 		if (ui::icon_button({ SIDE_W - 38, y, 28, SIDE_ROW - 2 }, ui::I_TIMES, ui::GRAY, "Remove saved location")) remove = i;
 	}
 	ui::end_clip();
 	ui::scrollbar(area, sidebar_scroll, content);
-	if (remove >= 0) prefs::remove(remove);
+	if (remove >= 0) places::remove(remove);
 	// Folders dropped on free sidebar space are saved as locations.
 	if (dragging && drag_dirs && !arc::active && txt::empty(&drop_target) && !drop_trash && ui::point_in(rl::get_mouse_position(), bar)) ui::outline(bar, ui::AQUA, 0, 2);
 }
@@ -1094,7 +1122,7 @@ fn void add_marked_locations() => @pool()
 	for (int i = 0; i < visible_count; i++)
 	{
 		if (!marked[i] || !entries[visible[i]].dir) continue;
-		if (!prefs::add(txt::join(txt::view(&directory), txt::view(&entries[visible[i]].name))))
+		if (!places::add(txt::join(txt::view(&directory), txt::view(&entries[visible[i]].name))))
 		{
 			ui::toast("Cannot add location (limit: 32; no newlines in paths)", ui::RED);
 			return;

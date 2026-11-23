@@ -4,6 +4,8 @@ import bmu::sys, bmu::txt;
 
 const int MAX_PLACES = 32;
 const int DATA_SIZE = 140000;
+// Saved locations live in bmu::places (shared with the apps' pickers); `place=` lines of older settings are read
+// once to migrate them.
 struct Place
 {
 	char[4096] path;
@@ -69,12 +71,6 @@ fn bool save() => @pool()
 	txt::append(&data, trash ? "trash=1\n" : "trash=0\n");
 	txt::append(&data, archive_open ? "archive_open=1\n" : "archive_open=0\n");
 	txt::append(&data, string::tformat("content_scale=%d\nui_scale=%d\n", content_percent, ui_percent));
-	for (int i = 0; i < place_count; i++)
-	{
-		txt::append(&data, "place=");
-		txt::append(&data, txt::view(&places[i].path));
-		txt::append(&data, "\n");
-	}
 	String temp = txt::join(folder, "settings.tmp");
 	if (!sys::write_file(temp, txt::view(&data))) return false;
 	if (!sys::move(temp, txt::join(folder, "settings"))) return false;
@@ -82,19 +78,3 @@ fn bool save() => @pool()
 	return true;
 }
 
-fn bool add(String path)
-{
-	if (place_count == MAX_PLACES || path.len >= 4096) return false;
-	foreach (c : path) if (c == '\n' || c == '\r') return false;
-	for (int i = 0; i < place_count; i++) if (txt::view(&places[i].path) == path) return true;
-	txt::set(&places[place_count++].path, path);
-	dirty = true;
-	return true;
-}
-
-fn void remove(int index)
-{
-	for (int i = index; i + 1 < place_count; i++) places[i] = places[i + 1];
-	place_count--;
-	dirty = true;
-}

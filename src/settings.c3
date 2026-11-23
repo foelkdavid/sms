@@ -3,7 +3,7 @@ import std::math;
 import raylib6::rl;
 import bmu::ui, bmu::txt;
 import sms::openers, sms::prefs;
-import std::core::string, std::io, bmu::sys, bmu::fileop;
+import std::core::string, std::io, bmu::sys, bmu::fileop, bmu::places;
 
 bool open;
 int tab;
@@ -108,7 +108,7 @@ fn void draw()
 	}
 	else if (tab == 2)
 	{
-		if (ui::checkbox(x + 4, area.y + 8, "Move deleted files to the trash", &prefs::trash)) prefs::dirty = true;
+		if (ui::checkbox(x + 4, area.y + 8, "Move deleted files to the trash", &prefs::trash)) { prefs::dirty = true; places::set_trash(prefs::trash); }
 		ui::text_fit(prefs::trash
 			? "Delete moves items to the trash. Shift + Delete deletes permanently (asks first)."
 			: "Delete removes items permanently after a confirmation. Nothing goes to the trash.", x + 4, area.y + 44, width - 8, 14, ui::FG4);
@@ -116,6 +116,9 @@ fn void draw()
 		ui::text_fit(prefs::archive_open
 			? "Double-click extracts the file to a temporary folder and opens it. Temporary copies are deleted when sms closes."
 			: "Off: archives are view only (always read-only either way); right-click and Extract files to open them.", x + 4, area.y + 120, width - 8, 14, ui::FG4);
+		bool dl = places::downloads;
+		if (ui::checkbox(x + 4, area.y + 160, "Show Downloads in the sidebar", &dl)) places::set_downloads(dl);
+		ui::text_fit("The sidebar (Downloads, Trash, saved locations) is shared with the file pickers of other bmu apps.", x + 4, area.y + 196, width - 8, 14, ui::FG4);
 	}
 	else
 	{
