@@ -86,6 +86,17 @@ fileop::Progress cur;          // snapshot of this frame
 Names clip;
 bool clip_cut;
 Names pending;                 // waiting for the delete confirmation
+// The running request, kept for "Retry as administrator" after a permission error.
+Names req;
+fileop::Kind req_kind;
+char[4096] req_dst;
+bool req_fallback;
+bool req_elevated;
+bool admin_open;
+bool admin_delete;             // TRASH failed: the retry deletes permanently as root (root's trash is not yours)
+char[256] admin_pw;            // wiped on submit / cancel / close
+char[512] admin_error;
+const int ID_ADMIN_PW = 50;
 bool confirm_open;
 bool pending_fallback;         // TRASH with permanent fallback for items on other drives
 int pending_untrashable;
@@ -104,7 +115,7 @@ ulong sample_bytes;
 double speed;                  // bytes / s, smoothed
 
 fn bool busy() => job.busy();
-fn bool modal() => confirm_open || ui::close_requested || (job.busy() && cur.state == CONFLICT);
+fn bool modal() => confirm_open || admin_open || ui::close_requested || (job.busy() && cur.state == CONFLICT);
 fn bool has_clip() => clip.count > 0;
 <* Entry names cut to the clipboard are drawn dimmed while their folder is shown. *>
 fn bool is_cut(String dir) => clip_cut && clip.count > 0 && txt::view(&clip.dir) == dir;
@@ -120,6 +131,8 @@ fn void close()
 {
 	job.close();
 	counter.close();
+	ui::wipe(&admin_pw);
+	req.free();
 	sizer.close();
 	clip.free();
 	pending.free();
@@ -145,10 +158,18 @@ fn void time_text(char[] out, double s) => @pool()
 	txt::set(out, string::tformat("%d h %d min", t / 3600, (t % 3600) / 60));
 }
 
-fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir = "", bool fallback = false) => @pool()
+fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir = "", bool fallback = false, char[] password = {}) => @pool()
 {
 	if (job.busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return false; }
-	if (!job.start(kind, src_dir, names, dst_dir, fallback)) { ui::toast("Could not start the file operation", ui::RED); return false; }
+	bool elevated = password.ptr != null;
+	bool ok = elevated ? job.start_elevated(kind, src_dir, names, dst_dir, password, fallback) : job.start(kind, src_dir, names, dst_dir, fallback);
+	if (!ok) { ui::toast("Could not start the file operation", ui::RED); return false; }
+	// Remember the request for a retry as administrator (names may point into the listing).
+	if (!elevated) req.set(src_dir, names);
+	req_kind = kind;
+	txt::set(&req_dst, dst_dir);
+	req_fallback = fallback;
+	req_elevated = elevated;
 	job_kind = kind;
 	job_items = (int)names.len;
 	job_clears_clip = false;
@@ -168,6 +189,7 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 		case COUNT: txt::set(&title, string::tformat("Counting %s", what));
 		case RESTORE: txt::set(&title, string::tformat("Restoring %s", what));
 	}
+	if (elevated) txt::append(&title, " as administrator");
 	txt::set(&detail, "Preparing…");
 	job.status(&cur);
 	return true;
@@ -269,8 +291,32 @@ fn void finished(fileop::Progress* p) => @pool()
 		case CANCELLED:
 			ui::toast(job_kind == COPY || job_kind == MOVE ? "Cancelled: nothing was changed" : "Cancelled", ui::YELLOW);
 		default:
+			// Permission denied: offer the same operation as administrator (not for restore / sizing).
+			bool denied = p.err == 13 || p.err == 1;
+			bool wrong_pw = req_elevated && txt::view(&p.error) == "Wrong password";
+			if ((denied && !req_elevated && job_kind != RESTORE && job_kind != COUNT) || wrong_pw)
+			{
+				admin_delete = req_kind == TRASH || req_kind == DELETE;
+				if (!wrong_pw) { txt::set(&admin_error, txt::empty(&p.error) ? "Permission denied" : txt::view(&p.error)); }
+				else { txt::set(&admin_error, "Wrong password. Try again."); }
+				ui::wipe(&admin_pw);
+				admin_open = true;
+				ui::focus = ID_ADMIN_PW;
+				return;
+			}
 			ui::toast(txt::empty(&p.error) ? "The file operation failed" : txt::view(&p.error), ui::RED);
 	}
+}
+
+<* Run the remembered request again as root (sudo asks for this one operation only). *>
+fn void retry_as_admin() => @pool()
+{
+	// Trash as root would fill root's trash: a denied trash becomes a permanent delete (the dialog says so).
+	fileop::Kind kind = req_kind == TRASH ? DELETE : req_kind;
+	bool clears = job_clears_clip;
+	begin(kind, txt::view(&req.dir), req.tview(), txt::view(&req_dst), false, &admin_pw);
+	job_clears_clip = clears;
+	ui::wipe(&admin_pw);
 }
 
 <* Trash size for the sidebar: one COUNT of `<trash>/files` when dirty, never per-frame I/O. *>
@@ -434,6 +480,32 @@ fn void draw_dialogs() => @pool()
 		if (ui::button({ box.x + 36 + bw * 2, by, bw, 40 }, "Keep both", PRIMARY)) job.answer(KEEP_BOTH, apply_all);
 		if (ui::button({ box.x + 44 + bw * 3, by, bw, 40 }, "Replace", DANGER)) job.answer(REPLACE, apply_all);
 		if (cancel) job.cancel();
+	}
+	else if (admin_open)
+	{
+		Rect box = ui::dialog(560, 264);
+		bool cancel = ui::dialog_header(box, ui::I_LOCK, "Permission denied") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
+		ui::text_fit(txt::view(&admin_error), box.x + 20, box.y + 60, box.width - 40, 14, ui::FG4);
+		String ask = admin_delete
+			? "Delete permanently as administrator? (Root's trash is not yours, so nothing goes to the trash.)"
+			: "Enter your password to do this as administrator. It counts for this operation only.";
+		ui::text_fit(ask, box.x + 20, box.y + 86, box.width - 40, 14, ui::FG);
+		bool submitted;
+		ui::secret_input(ID_ADMIN_PW, { box.x + 20, box.y + 118, box.width - 40, 40 }, &admin_pw, "Password for sudo", &submitted);
+		if (ui::button({ box.x + 20, box.y + 196, 200, 40 }, "Cancel")) cancel = true;
+		bool go = ui::button({ box.x + box.width - 260, box.y + 196, 240, 40 }, admin_delete ? "Delete as administrator" : "Retry as administrator", admin_delete ? DANGER : PRIMARY) || submitted;
+		if (go)
+		{
+			admin_open = false;
+			ui::unfocus();
+			retry_as_admin();
+		}
+		else if (cancel)
+		{
+			admin_open = false;
+			ui::wipe(&admin_pw);
+			ui::unfocus();
+		}
 	}
 	else if (confirm_open)
 	{

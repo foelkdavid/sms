@@ -163,6 +163,8 @@ fn void select_only(int vi)
 
 fn int main(String[] args)
 {
+	// Root helper for "Retry as administrator": nothing else of sms runs as root.
+	if (fileop::is_helper(args)) return fileop::helper_main(args);
 	String start = ".";
 	for (usz i = 1; i < args.len; i++)
 	{
