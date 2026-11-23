@@ -1126,6 +1126,9 @@ fn void frame() => @pool()
 		{
 			complete::close();
 			go(txt::view(&path_edit));
+			// Arrow keys continue in the list: select ../ (or the first entry at /).
+			if (txt::view(&directory) != "/") { select_only(-2); }
+			else if (visible_count) { select_only(0); }
 		}
 	}
 	if (ui::icon_button({ w - 84, 12, 32, 36 }, searching ? ui::I_TIMES : ui::I_SEARCH, ui::FG4, searching ? "Clear search (Escape)" : "Search this folder (Ctrl+F)"))
