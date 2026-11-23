@@ -2,8 +2,7 @@
 Type=Application
 Name=sms
 Comment=Minimal file explorer
-Exec=../sms/build/sms --dir ~
-Path=~
+Exec=@EXEC@
 Icon=system-file-manager
 Terminal=false
 Categories=System;FileTools;FileManager;

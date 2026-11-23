@@ -25,11 +25,18 @@ Click a folder to enter it (opens on mouse release, so you can drag it instead).
 - **Ctrl+Shift +/−:** whole-UI zoom, in 25% steps (75–300%); **Ctrl+Shift+0** resets it to the monitor default
 - Both zoom levels are remembered. Plus/minus keys follow the keyboard layout; keypad +/− also work.
 
-The desktop launcher `sms.desktop` opens `~`. It uses absolute paths for this checkout; update `Exec` and `Path` if moving the project. Install with:
+## Install / uninstall (Linux)
+
+C3 0.8.x has no literal `c3c install` or `c3c uninstall` command; use these project targets (requires Python 3):
 
 ```sh
-install -Dm644 sms.desktop ~/.local/share/applications/sms.desktop
+c3c build install --trust=full
+c3c build uninstall --trust=full
 ```
+
+Install builds sms first, then copies it to `~/.local/bin/sms`, generates a desktop launcher from `sms.desktop` under `$XDG_DATA_HOME/applications` (default `~/.local/share/applications`), and copies the license notices to `$XDG_DATA_HOME/sms/licenses`. The launcher opens your home folder and does not depend on the checkout. Add `~/.local/bin` to `PATH` for terminal use. No sudo is needed; `--trust=full` allows C3 to run the installation script.
+
+Uninstall removes those installed files, without building the app or deleting settings and saved locations.
 
 ## Image preview
 
@@ -62,6 +69,8 @@ Performance is a permanent project priority; see [AGENTS.md](AGENTS.md). Optimiz
 Current boundaries: directory reads are synchronous on navigation, with a visible limit warning at 16,384 entries. Slow/network folders can still block navigation. Rendering currently uses bmu's standard 60 FPS loop; it is not event-driven. No startup or navigation latency guarantees have been measured yet.
 
 ## Checks
+
+`python3 tests/install.py` builds and checks installation, the generated desktop launcher, bundled license notices, and repeatable uninstall. It uses temporary home/config/data directories and verifies that uninstall preserves settings and unrelated files (requires Python 3 and C3; no display needed).
 
 `python3 tests/preview.py` checks image selection, aspect ratios, transparency, stale-result replacement, errors,
 limits, and clearing on navigation/non-image selection (requires visible X11/XTest and Pillow; Hyprland uses

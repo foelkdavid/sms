@@ -10,6 +10,15 @@
       "type": "executable",
       "sources": ["src/**"],
       "dependencies": ["raylib6", "bmu"]
+    },
+    "install": {
+      "type": "prepare",
+      "depends-on": ["sms"],
+      "exec": ["python3 install.py install"]
+    },
+    "uninstall": {
+      "type": "prepare",
+      "exec": ["python3 install.py uninstall"]
     }
   }
 }
