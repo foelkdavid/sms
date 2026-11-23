@@ -112,10 +112,10 @@ fn void draw()
 		ui::text_fit(prefs::trash
 			? "Delete moves items to the trash. Shift + Delete deletes permanently (asks first)."
 			: "Delete removes items permanently after a confirmation. Nothing goes to the trash.", x + 4, area.y + 44, width - 8, 14, ui::FG4);
-		if (ui::checkbox(x + 4, area.y + 84, "Open files inside archives", &prefs::archive_open)) prefs::dirty = true;
+		if (ui::checkbox(x + 4, area.y + 84, "Double-click in an archive opens a temporary copy", &prefs::archive_open)) prefs::dirty = true;
 		ui::text_fit(prefs::archive_open
 			? "Double-click extracts the file to a temporary folder and opens it. Temporary copies are deleted when sms closes."
-			: "Archives are view only: right-click and Extract files to open them.", x + 4, area.y + 120, width - 8, 14, ui::FG4);
+			: "Off: archives are view only (always read-only either way); right-click and Extract files to open them.", x + 4, area.y + 120, width - 8, 14, ui::FG4);
 	}
 	else
 	{
