@@ -1,5 +1,5 @@
 module sms;
-import std::math, std::core::string, std::io;
+import std::math, std::core::string, std::io, libc;
 import raylib6::rl;
 import bmu::ui, bmu::txt, bmu::sys, bmu::fileop;
 import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops;
@@ -41,8 +41,15 @@ char[4096] trash_files; // $XDG_DATA_HOME/Trash/files, resolved once at startup.
 bool drop_trash; // The current drag is over the sidebar's Trash row; reset every frame.
 int origin_entry = -1; // Entry whose trash origin is in origin_tip (one cached record, read on hover change only).
 char[4200] origin_tip;
-char[64] sel_status;
-int sel_status_count = -1;
+// Bottom bar: details of the selection, rebuilt only when the selection or listing changes.
+char[256] info_name;
+char[640] info_detail;
+float info_name_w;
+float status_w;
+int info_selected = -3;
+int info_marked = -1;
+int info_gen = -1;
+int list_gen; // bumped by refilter(): the listing (and entry indices) changed
 int pressed_row = -1;
 int last_click_row = -1;
 double last_click_time;
@@ -148,6 +155,7 @@ fn void refilter() => @pool()
 	clear_marks();
 	anchor = -1;
 	collapse_row = -1;
+	list_gen++;
 	visible_count = 0;
 	for (int i = 0; i < entry_count; i++)
 	{
@@ -350,7 +358,73 @@ fn void resolve_trash() => @pool()
 	sys::realpath(&trash_files, txt::view(&raw).tcopy());
 }
 
-<* "Deleted from ~/Docs · 2026-11-23 14:02" for a trash entry; reads its .trashinfo only when the hovered entry changes. *>
+<* Rebuild the bottom-bar selection details when the selection changed: one lstat for a single item, a count for several. *>
+fn void update_info(bool trash_top) => @pool()
+{
+	if (selected == info_selected && marked_count == info_marked && list_gen == info_gen) return;
+	if (list_gen != info_gen) status_w = ui::text_w(txt::view(&status), 16);
+	info_selected = selected;
+	info_marked = marked_count;
+	info_gen = list_gen;
+	info_name[0] = 0;
+	info_detail[0] = 0;
+	if (marked_count > 1)
+	{
+		int dirs;
+		for (int i = 0; i < visible_count; i++) if (marked[i] && entries[visible[i]].dir) dirs++;
+		int files = marked_count - dirs;
+		txt::set(&info_name, string::tformat("%d selected", marked_count));
+		String d = dirs ? string::tformat("%d %s", dirs, dirs == 1 ? "folder" : "folders") : "";
+		String f = files ? string::tformat("%d %s", files, files == 1 ? "file" : "files") : "";
+		txt::set(&info_detail, d.len && f.len ? string::tformat("%s, %s", d, f) : d.len ? d : f);
+	}
+	else
+	{
+		int vi = selected;
+		if (marked_count == 1) { for (int i = 0; i < visible_count; i++) if (marked[i]) { vi = i; break; } }
+		if (vi < 0) return;
+		int entry = visible[vi];
+		String name = txt::view(&entries[entry].name);
+		txt::set(&info_name, name);
+		libc::Stat st;
+		if (libc::lstat(txt::join(txt::view(&directory), name).zstr_tcopy(), &st) != 0)
+		{
+			txt::set(&info_detail, "cannot read");
+		}
+		else
+		{
+			uint kind = st.st_mode & 0xF000;
+			String type;
+			if (kind == 0x4000) { type = "Folder"; }
+			else if (kind == 0xA000) { type = "Link"; }
+			else if (kind != 0x8000) { type = "Special file"; }
+			else
+			{
+				String ext = "";
+				sz? dot = name.rindex_of_char('.');
+				if (try dot && dot > 0 && (usz)dot + 1 < name.len && name.len - (usz)dot <= 9) ext = name[(usz)dot + 1..];
+				char[16] up;
+				foreach (i, c : ext) up[i] = c >= 'a' && c <= 'z' ? c - 32 : c;
+				type = ext.len ? string::tformat("%s file", (String)up[:ext.len]) : "File";
+			}
+			char[32] size;
+			ops::size_text(&size, (ulong)st.st_size);
+			char[32] when;
+			libc::Tm tm;
+			Time_t mt = st.st_mtime;
+			libc::localtime_r(&mt, &tm);
+			libc::strftime(&when, when.len, "%Y-%m-%d %H:%M", &tm);
+			String detail = kind == 0x8000
+				? string::tformat("%s · %s · modified %s", type, txt::view(&size), ((ZString)&when).str_view())
+				: string::tformat("%s · modified %s", type, ((ZString)&when).str_view());
+			if (trash_top) detail = string::tformat("%s · %s", detail, trash_origin(entry));
+			txt::set(&info_detail, detail);
+		}
+	}
+	info_name_w = ui::text_w(txt::view(&info_name), 16);
+}
+
+<* "deleted from ~/Docs on 2026-11-23 14:02" for a trash entry; reads its .trashinfo only when the hovered entry changes. *>
 fn String trash_origin(int entry) => @pool()
 {
 	if (entry == origin_entry) return txt::view(&origin_tip);
@@ -359,7 +433,7 @@ fn String trash_origin(int entry) => @pool()
 	char[32] date;
 	if (!fileop::trash_info(txt::view(&trash_files), txt::view(&entries[entry].name), &path, &date))
 	{
-		txt::set(&origin_tip, "No restore information");
+		txt::set(&origin_tip, "no restore information");
 		return txt::view(&origin_tip);
 	}
 	String from = txt::dirname(txt::view(&path));
@@ -367,7 +441,7 @@ fn String trash_origin(int entry) => @pool()
 	if (home.len > 1 && from.starts_with(home) && (from.len == home.len || from[home.len] == '/')) from = string::tformat("~%s", from[home.len..]);
 	String when = txt::view(&date);
 	if (when.len > 16) when = when[:16]; // drop seconds
-	txt::set(&origin_tip, when.len ? string::tformat("Deleted from %s · %s", from, when) : string::tformat("Deleted from %s", from));
+	txt::set(&origin_tip, when.len ? string::tformat("deleted from %s on %s", from, when) : string::tformat("deleted from %s", from));
 	return txt::view(&origin_tip);
 }
 
@@ -779,7 +853,6 @@ fn void frame() => @pool()
 			ui::outline(row, ui::AQUA, 4, 2);
 		}
 		bool dim = dim_cut && cut_entry[visible[vi]];
-		if (trash_top && hovered && !dragging && !banding) ui::tooltip(trash_origin(visible[vi]));
 		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
 		ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, dim ? ui::GRAY : ui::FG);
 		if (clicked)
@@ -853,13 +926,20 @@ fn void frame() => @pool()
 	if (show_preview && preview::active) preview::draw(preview_panel);
 	ops::draw_panel(ops_panel);
 	ui::panel({ 0, h - 28, w, 28 }, ui::BG_HARD);
-	ui::text(txt::view(&status), 16, h - 22, 16, ui::GRAY);
-	if (marked_count != sel_status_count)
+	update_info(trash_top);
+	if (txt::empty(&info_name) && txt::empty(&info_detail))
 	{
-		sel_status_count = marked_count;
-		txt::set(&sel_status, marked_count > 1 ? string::tformat("%d selected", marked_count) : "");
+		ui::text(txt::view(&status), 16, h - 22, 16, ui::GRAY);
 	}
-	if (!txt::empty(&sel_status)) ui::text(txt::view(&sel_status), w - 16 - ui::text_w(txt::view(&sel_status), 16), h - 22, 16, ui::FG4);
+	else
+	{
+		// Selection details left, folder item count right.
+		float right = w - 16 - status_w;
+		ui::text(txt::view(&status), right, h - 22, 16, ui::GRAY);
+		float name_w = math::min(info_name_w, (right - 40) * 0.5f);
+		ui::text_fit(txt::view(&info_name), 16, h - 22, name_w, 16, ui::FG);
+		ui::text_fit(txt::view(&info_detail), 16 + name_w + 12, h - 22, math::max(0.0f, right - name_w - 52), 16, ui::FG4);
+	}
 	finish_drag(h);
 	if (rl::is_mouse_button_released(rl::RLMouseButton.LEFT) || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { pressed_row = -1; collapse_row = -1; }
 	settings::draw();
