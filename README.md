@@ -9,10 +9,6 @@
   <img src="docs/screenshot.png" width="720" alt="sms showing a home folder with saved locations">
 </p>
 
-Browse, copy, move and trash files; search the current folder or all subfolders; browse and extract archives;
-preview images; open files with your own programs. Everything slow happens in the background, so the window never
-freezes.
-
 **Press `Ctrl + K`** for all keyboard shortcuts, settings (file openers, trash, archives) and the About page.
 
 ## Requirements to run
