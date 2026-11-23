@@ -50,6 +50,52 @@ int info_selected = -3;
 int info_marked = -1;
 int info_gen = -1;
 int list_gen; // bumped by refilter(): the listing (and entry indices) changed
+// Combined size of a multi-selection: background COUNT, started once the selection rests for 0.25 s.
+fileop::Job size_job;
+double size_due; // 0 = nothing pending
+char[160] info_counts; // "2 folders, 3 files"
+struct TypeName { String ext; String name; }
+TypeName[*] type_names = {
+	{ "md", "Markdown" }, { "markdown", "Markdown" }, { "txt", "Text" }, { "log", "Log file" }, { "csv", "CSV table" },
+	{ "pdf", "PDF document" }, { "epub", "EPUB book" }, { "odt", "OpenDocument text" }, { "doc", "Word document" },
+	{ "docx", "Word document" }, { "xls", "Excel spreadsheet" }, { "xlsx", "Excel spreadsheet" }, { "ods", "OpenDocument spreadsheet" },
+	{ "ppt", "PowerPoint presentation" }, { "pptx", "PowerPoint presentation" }, { "odp", "OpenDocument presentation" },
+	{ "png", "PNG image" }, { "jpg", "JPEG image" }, { "jpeg", "JPEG image" }, { "gif", "GIF image" }, { "webp", "WebP image" },
+	{ "bmp", "Bitmap image" }, { "svg", "SVG image" }, { "ico", "Icon" }, { "tif", "TIFF image" }, { "tiff", "TIFF image" },
+	{ "heic", "HEIC image" }, { "avif", "AVIF image" }, { "raw", "Raw image" }, { "psd", "Photoshop image" }, { "xcf", "GIMP image" },
+	{ "mp3", "MP3 audio" }, { "flac", "FLAC audio" }, { "wav", "WAV audio" }, { "ogg", "Ogg audio" }, { "opus", "Opus audio" },
+	{ "m4a", "AAC audio" }, { "aac", "AAC audio" }, { "mp4", "MP4 video" }, { "mkv", "Matroska video" }, { "webm", "WebM video" },
+	{ "mov", "QuickTime video" }, { "avi", "AVI video" }, { "zip", "ZIP archive" }, { "tar", "Tar archive" }, { "gz", "Gzip archive" },
+	{ "tgz", "Gzip archive" }, { "xz", "XZ archive" }, { "zst", "Zstandard archive" }, { "bz2", "Bzip2 archive" }, { "7z", "7-Zip archive" },
+	{ "rar", "RAR archive" }, { "iso", "Disc image" }, { "img", "Disk image" }, { "deb", "Debian package" }, { "rpm", "RPM package" },
+	{ "xbps", "XBPS package" }, { "appimage", "AppImage" }, { "exe", "Windows program" }, { "msi", "Windows installer" },
+	{ "dll", "Windows library" }, { "so", "Shared library" }, { "a", "Static library" }, { "o", "Object file" },
+	{ "c", "C source" }, { "h", "C header" }, { "cpp", "C++ source" }, { "cc", "C++ source" }, { "hpp", "C++ header" },
+	{ "c3", "C3 source" }, { "c3i", "C3 interface" }, { "zig", "Zig source" }, { "zon", "Zig object notation" }, { "rs", "Rust source" },
+	{ "go", "Go source" }, { "py", "Python script" }, { "sh", "Shell script" }, { "bash", "Shell script" }, { "zsh", "Shell script" },
+	{ "fish", "Fish script" }, { "lua", "Lua script" }, { "rb", "Ruby script" }, { "pl", "Perl script" }, { "js", "JavaScript" },
+	{ "mjs", "JavaScript" }, { "ts", "TypeScript" }, { "java", "Java source" }, { "kt", "Kotlin source" }, { "cs", "C# source" },
+	{ "swift", "Swift source" }, { "html", "HTML document" }, { "htm", "HTML document" }, { "css", "CSS stylesheet" },
+	{ "json", "JSON" }, { "toml", "TOML" }, { "yaml", "YAML" }, { "yml", "YAML" }, { "xml", "XML" }, { "ini", "INI settings" },
+	{ "conf", "Configuration" }, { "cfg", "Configuration" }, { "desktop", "Desktop entry" }, { "service", "Service unit" },
+	{ "patch", "Patch" }, { "diff", "Diff" }, { "sql", "SQL" }, { "db", "Database" }, { "sqlite", "SQLite database" },
+	{ "ttf", "TrueType font" }, { "otf", "OpenType font" }, { "woff2", "Web font" }, { "torrent", "Torrent" },
+	{ "key", "Key" }, { "pem", "Certificate" }, { "crt", "Certificate" }, { "gpg", "GPG file" }, { "asc", "GPG signature" }
+};
+
+<* Human type name from the extension (case-insensitive); unknown -> "EXT file". Only on selection change. *>
+fn String type_name(String name, bool exec) // temp result: caller is pooled
+{
+	sz? dot = name.rindex_of_char('.');
+	if (catch dot) return exec ? "Program" : "File";
+	if (dot == 0 || (usz)dot + 1 >= name.len) return exec ? "Program" : "File";
+	String ext = name[(usz)dot + 1..];
+	foreach (t : type_names) if (txt::ieq(t.ext, ext)) return t.name;
+	if (ext.len > 8) return exec ? "Program" : "File";
+	char[16] up;
+	foreach (i, c : ext) up[i] = c >= 'a' && c <= 'z' ? c - 32 : c;
+	return string::tformat("%s file", (String)up[:ext.len]);
+}
 int pressed_row = -1;
 int last_click_row = -1;
 double last_click_time;
@@ -117,6 +163,7 @@ fn int main(String[] args)
 	defer ui::close();
 	defer preview::close();
 	defer ops::close();
+	defer size_job.close();
 	ui::app_args(args);
 	while (ui::running()) frame();
 	return 0;
@@ -368,6 +415,8 @@ fn void update_info(bool trash_top) => @pool()
 	info_gen = list_gen;
 	info_name[0] = 0;
 	info_detail[0] = 0;
+	size_due = 0;
+	size_job.close();
 	if (marked_count > 1)
 	{
 		int dirs;
@@ -376,7 +425,10 @@ fn void update_info(bool trash_top) => @pool()
 		txt::set(&info_name, string::tformat("%d selected", marked_count));
 		String d = dirs ? string::tformat("%d %s", dirs, dirs == 1 ? "folder" : "folders") : "";
 		String f = files ? string::tformat("%d %s", files, files == 1 ? "file" : "files") : "";
-		txt::set(&info_detail, d.len && f.len ? string::tformat("%s, %s", d, f) : d.len ? d : f);
+		txt::set(&info_counts, d.len && f.len ? string::tformat("%s, %s", d, f) : d.len ? d : f);
+		txt::set(&info_detail, string::tformat("%s · counting…", txt::view(&info_counts)));
+		size_job.close(); // a running count is for the old selection
+		size_due = ui::now + 0.25;
 	}
 	else
 	{
@@ -400,12 +452,7 @@ fn void update_info(bool trash_top) => @pool()
 			else if (kind != 0x8000) { type = "Special file"; }
 			else
 			{
-				String ext = "";
-				sz? dot = name.rindex_of_char('.');
-				if (try dot && dot > 0 && (usz)dot + 1 < name.len && name.len - (usz)dot <= 9) ext = name[(usz)dot + 1..];
-				char[16] up;
-				foreach (i, c : ext) up[i] = c >= 'a' && c <= 'z' ? c - 32 : c;
-				type = ext.len ? string::tformat("%s file", (String)up[:ext.len]) : "File";
+				type = type_name(name, (st.st_mode & 0o111) != 0);
 			}
 			char[32] size;
 			ops::size_text(&size, (ulong)st.st_size);
@@ -422,6 +469,23 @@ fn void update_info(bool trash_top) => @pool()
 		}
 	}
 	info_name_w = ui::text_w(txt::view(&info_name), 16);
+}
+
+<* Start the debounced selection COUNT and show its total when it ends (no per-frame I/O or formatting). *>
+fn void poll_selection_size() => @pool()
+{
+	if (size_due > 0 && ui::now >= size_due && marked_count > 1)
+	{
+		size_due = 0;
+		if (!size_job.start(COUNT, txt::view(&directory), marked_names())) txt::set(&info_detail, txt::view(&info_counts));
+	}
+	fileop::Progress p;
+	if (!size_job.finished(&p)) return;
+	char[32] size;
+	ops::size_text(&size, p.bytes_total);
+	if (p.state == DONE) { txt::set(&info_detail, string::tformat("%s · %s", txt::view(&info_counts), txt::view(&size))); }
+	else if (p.state == FAILED) { txt::set(&info_detail, string::tformat("%s · at least %s", txt::view(&info_counts), txt::view(&size))); }
+	else { txt::set(&info_detail, txt::view(&info_counts)); }
 }
 
 <* "deleted from ~/Docs on 2026-11-23 14:02" for a trash entry; reads its .trashinfo only when the hovered entry changes. *>
@@ -927,6 +991,7 @@ fn void frame() => @pool()
 	ops::draw_panel(ops_panel);
 	ui::panel({ 0, h - 28, w, 28 }, ui::BG_HARD);
 	update_info(trash_top);
+	poll_selection_size();
 	if (txt::empty(&info_name) && txt::empty(&info_detail))
 	{
 		ui::text(txt::view(&status), 16, h - 22, 16, ui::GRAY);
