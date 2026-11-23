@@ -168,7 +168,7 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace or -: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
@@ -1019,6 +1019,9 @@ fn void frame() => @pool()
 			prefs::dirty = true;
 		}
 		if (rl::is_key_pressed(rl::RLKeyboardKey.BACKSPACE)) go(txt::dirname(txt::view(&directory)));
+		// Plain "-" (layout-aware, or keypad minus) also goes up; Ctrl+- stays content zoom.
+		bool minus = rl::is_key_pressed((rl::RLKeyboardKey)ui::minus_key) || rl::is_key_pressed(rl::RLKeyboardKey.KP_SUBTRACT);
+		if (minus && !ui::ctrl_down() && !ui::shift_down()) go(txt::dirname(txt::view(&directory)));
 		if (rl::is_key_pressed(rl::RLKeyboardKey.F5)) go(txt::view(&directory));
 		if (!ui::ctrl_down() && ui::letter('s') && !deep) size_folders();
 		if (ui::ctrl_down() && ui::letter('a') && visible_count && !deep)

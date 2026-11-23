@@ -20,7 +20,7 @@ Shortcut[41] shortcuts = {
 	{ "NAVIGATION", "", true },
 	{ "Up / Down", "Move selection (hold to repeat)", false },
 	{ "Enter", "Open selected folder, or open selected files", false },
-	{ "Backspace", "Go to parent folder", false },
+	{ "Backspace / -", "Go to parent folder", false },
 	{ "Ctrl + L", "Edit folder path; Enter to go", false },
 	{ "F5", "Refresh current folder", false },
 	{ "SELECTION", "", true },
