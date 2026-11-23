@@ -28,7 +28,7 @@ Shortcut[41] shortcuts = {
 	{ "Shift + click", "Select a range (Ctrl + Shift adds it)", false },
 	{ "Shift + Up / Down", "Extend the selection", false },
 	{ "Ctrl + A", "Select all", false },
-	{ "S", "Include folder sizes in the selection size", false },
+	{ "S", "Size selected folders, or this folder if nothing is selected", false },
 	{ "Drag on empty space", "Draw a selection box (Ctrl adds)", false },
 	{ "Escape / click empty", "Clear the selection", false },
 	{ "FILES", "", true },

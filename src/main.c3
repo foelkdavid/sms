@@ -73,6 +73,7 @@ bool info_deep;
 int info_dirs;
 int info_files;
 bool size_all; // S pressed: folders are included in the size
+bool size_here; // S with nothing selected: sizing the shown folder (counted by its entries)
 struct TypeName { String ext; String name; }
 TypeName[*] type_names = {
 	{ "md", "Markdown" }, { "markdown", "Markdown" }, { "txt", "Text" }, { "log", "Log file" }, { "csv", "CSV table" },
@@ -632,6 +633,7 @@ fn void update_info(bool trash_top) => @pool()
 	info_dirs = 0;
 	info_files = 0;
 	size_all = false;
+	size_here = false;
 	size_due = 0;
 	size_job.close(); // a running count is for the old selection
 	if (deep)
@@ -667,6 +669,11 @@ fn void update_info(bool trash_top) => @pool()
 <* S: size the selected folders too (recursive, background). *>
 fn void size_folders() => @pool()
 {
+	if (!deep && marked_count == 0 && selected < 0)
+	{
+		size_current_folder();
+		return;
+	}
 	if (size_all || (!info_dirs && !info_single_dir)) return;
 	size_all = true;
 	size_due = 0;
@@ -684,6 +691,29 @@ fn void size_folders() => @pool()
 	}
 	txt::set(&info_sizepart, ok ? "counting…" : "size unavailable");
 	compose_detail();
+}
+
+<* S with nothing selected: size of the shown folder, counted from its entries (works for "/", includes hidden). *>
+fn void size_current_folder() => @pool()
+{
+	if (size_here) return;
+	String dir = txt::view(&directory);
+	describe_single(dir, home_short(dir), -1);
+	size_here = true;
+	size_all = true;
+	size_job.close();
+	if (!entry_count)
+	{
+		txt::set(&info_sizepart, "empty");
+	}
+	else
+	{
+		String[] names = mem::talloc_array(String, (usz)entry_count);
+		for (int i = 0; i < entry_count; i++) names[i] = txt::view(&entries[i].name);
+		txt::set(&info_sizepart, size_job.start(COUNT, dir, names) ? "counting…" : "size unavailable");
+	}
+	compose_detail();
+	info_name_w = ui::text_w(txt::view(&info_name), 16);
 }
 
 <* Start the debounced file-size COUNT and show totals when a count ends (no per-frame I/O or formatting). *>
@@ -706,8 +736,10 @@ fn void poll_selection_size() => @pool()
 	else if (info_single_dir)
 	{
 		char[32] items;
-		ops::group_digits(&items, math::max(0, p.files_total - 1));
-		txt::set(&info_sizepart, string::tformat("%s, %s %s", total, txt::view(&items), p.files_total == 2 ? "item" : "items"));
+		// Counting a folder by name includes the folder itself; counting the shown folder by its entries does not.
+		int count = size_here ? p.files_total : math::max(0, p.files_total - 1);
+		ops::group_digits(&items, count);
+		txt::set(&info_sizepart, string::tformat("%s, %s %s", total, txt::view(&items), count == 1 ? "item" : "items"));
 	}
 	else if (!size_all && info_dirs) { txt::set(&info_sizepart, string::tformat("%s in files · S adds folders", total)); }
 	else { txt::set(&info_sizepart, total); }
