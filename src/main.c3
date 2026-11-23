@@ -20,7 +20,14 @@ sys::Entry[MAX_ENTRIES] entries;
 int entry_count;
 int[MAX_ENTRIES] visible;
 int visible_count;
-int selected = -1; // Visible entry index; -1 = none, -2 = parent row.
+int selected = -1; // Cursor: visible entry index; -1 = none, -2 = parent row.
+bool[MAX_ENTRIES] marked; // Multi-selection by visible index.
+int marked_count;
+int anchor = -1; // Shift range origin (visible index).
+int collapse_row = -1; // Plain press on a marked row: collapse to it on release unless dragged.
+int drag_dirs; // Marked folders carried by the current drag (0 = single drag_path).
+char[64] sel_status;
+int sel_status_count = -1;
 int pressed_row = -1;
 int last_click_row = -1;
 double last_click_time;
@@ -31,6 +38,33 @@ int pressed_entry = -1;
 bool dragging;
 rl::RLVector2 press_at;
 char[4096] drag_path;
+
+fn void mark(int vi, bool on)
+{
+	if (marked[vi] == on) return;
+	marked[vi] = on;
+	marked_count += on ? 1 : -1;
+}
+
+fn void clear_marks()
+{
+	if (!marked_count) return;
+	for (int i = 0; i < visible_count && marked_count; i++) mark(i, false);
+}
+
+fn void mark_range(int a, int b)
+{
+	for (int i = math::min(a, b); i <= math::max(a, b); i++) mark(i, true);
+}
+
+// Make vi the only selected entry and the range anchor.
+fn void select_only(int vi)
+{
+	clear_marks();
+	if (vi >= 0) mark(vi, true);
+	anchor = vi;
+	select_entry(vi);
+}
 
 fn int main(String[] args)
 {
@@ -45,7 +79,7 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; Ctrl+A selects all; Escape clears.\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
@@ -92,6 +126,9 @@ fn bool navigate(String path) => @pool()
 fn void refilter() => @pool()
 {
 	preview::clear();
+	clear_marks();
+	anchor = -1;
+	collapse_row = -1;
 	visible_count = 0;
 	for (int i = 0; i < entry_count; i++)
 	{
@@ -200,13 +237,44 @@ fn void update_drag()
 	}
 }
 
+fn void add_marked_locations() => @pool()
+{
+	for (int i = 0; i < visible_count; i++)
+	{
+		if (!marked[i] || !entries[visible[i]].dir) continue;
+		if (!prefs::add(txt::join(txt::view(&directory), txt::view(&entries[visible[i]].name))))
+		{
+			ui::toast("Cannot add location (limit: 32; no newlines in paths)", ui::RED);
+			return;
+		}
+	}
+}
+
+// Enter on a multi-selection launches the selected files (bounded by the opener slots).
+// Returns false when no files are selected (folders only).
+fn bool launch_marked() => @pool()
+{
+	bool found;
+	for (int i = 0; i < visible_count; i++)
+	{
+		if (!marked[i] || entries[visible[i]].dir) continue;
+		found = true;
+		if (!openers::launch(txt::join(txt::view(&directory), txt::view(&entries[visible[i]].name)))) break;
+	}
+	return found;
+}
+
 fn void finish_drag(float h)
 {
 	Rect bar = { 0, 60, SIDE_W, h - 88 };
 	bool over_bar = prefs::sidebar && ui::point_in(rl::get_mouse_position(), bar);
 	if (pressed_entry >= 0 && rl::is_mouse_button_released(rl::RLMouseButton.LEFT))
 	{
-		if (dragging && over_bar && ui::top == 0) add_location(txt::view(&drag_path));
+		if (dragging && over_bar && ui::top == 0)
+		{
+			if (drag_dirs) { add_marked_locations(); }
+			else { add_location(txt::view(&drag_path)); }
+		}
 		pressed_entry = -1;
 		dragging = false;
 	}
@@ -232,7 +300,8 @@ fn void finish_drag(float h)
 		rl::RLVector2 mouse = rl::get_mouse_position();
 		ui::panel({ mouse[0] + 14, mouse[1] + 14, 210, 42 }, ui::BG_HARD, 4);
 		ui::text(ui::I_FOLDER, mouse[0] + 24, mouse[1] + 22, 23, ui::YELLOW);
-		ui::text_fit(txt::basename(txt::view(&drag_path)), mouse[0] + 56, mouse[1] + 27, 154, 16, ui::FG);
+		String label = drag_dirs ? string::tformat("%d folder%s", drag_dirs, drag_dirs == 1 ? "" : "s") : txt::basename(txt::view(&drag_path));
+		ui::text_fit(label, mouse[0] + 56, mouse[1] + 27, 154, 16, ui::FG);
 	}
 }
 
@@ -265,6 +334,7 @@ fn void frame() => @pool()
 			ui::toast(string::tformat("Content scale %d%%", percent));
 		}
 	}
+	bool was_pressing = pressed_entry >= 0;
 	update_drag();
 	if (dragging || !rl::is_window_focused())
 	{
@@ -306,6 +376,13 @@ fn void frame() => @pool()
 		}
 		if (rl::is_key_pressed(rl::RLKeyboardKey.BACKSPACE)) go(txt::dirname(txt::view(&directory)));
 		if (rl::is_key_pressed(rl::RLKeyboardKey.F5)) go(txt::view(&directory));
+		if (ui::ctrl_down() && ui::letter('a') && visible_count)
+		{
+			mark_range(0, visible_count - 1);
+			if (selected < 0) { select_entry(0); }
+			if (anchor < 0) anchor = selected;
+		}
+		if (!was_pressing && !searching && rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { clear_marks(); anchor = -1; collapse_row = -1; }
 	}
 	ui::panel({ 0, 0, w, 60 }, ui::BG_HARD);
 	if (ui::icon_button({ 12, 12, 36, 36 }, ui::I_UP, ui::FG4, "Parent folder (Backspace)")) go(txt::dirname(txt::view(&directory)));
@@ -348,6 +425,9 @@ fn void frame() => @pool()
 	float content = (float)row_count * row_h;
 	int enter = -1;
 	bool go_up;
+	bool multi_enter;
+	bool ctrl = ui::ctrl_down();
+	bool shift = ui::shift_down();
 	if (list_keys && ui::focus < 0 && !submitted && !ui::ctrl_down() && row_count > 0)
 	{
 		int step = (int)ui::repeat(rl::RLKeyboardKey.DOWN) - (int)ui::repeat(rl::RLKeyboardKey.UP);
@@ -355,7 +435,21 @@ fn void frame() => @pool()
 		{
 			int current = selected == -2 ? 0 : selected < 0 ? -1 : selected + parent_rows;
 			int next = current < 0 ? (step > 0 ? 0 : row_count - 1) : math::clamp(current + step, 0, row_count - 1);
-			select_entry(next < parent_rows ? -2 : next - parent_rows);
+			if (ui::shift_down() && visible_count)
+			{
+				// Ranges never include the parent row.
+				next = math::max(next, parent_rows);
+				int vi = next - parent_rows;
+				if (anchor < 0) anchor = selected >= 0 ? selected : vi;
+				clear_marks();
+				mark_range(anchor, vi);
+				select_entry(vi);
+			}
+			else
+			{
+				select_only(next < parent_rows ? -2 : next - parent_rows);
+			}
+			collapse_row = -1;
 			float y = (float)next * row_h;
 			if (y < scroll) scroll = y;
 			if (y + row_h > scroll + list.height) scroll = y + row_h - list.height;
@@ -367,7 +461,8 @@ fn void frame() => @pool()
 		if (rl::is_key_pressed(rl::RLKeyboardKey.ENTER))
 		{
 			if (selected == -2) { go_up = true; }
-			else if (selected >= 0) { enter = visible[selected]; }
+			else if (marked_count > 1) { multi_enter = true; }
+			if (selected >= 0) { enter = visible[selected]; }
 		}
 	}
 	scroll = ui::scroll_wheel(list, scroll, content);
@@ -388,7 +483,9 @@ fn void frame() => @pool()
 		}
 		if (pressed_row == i && hovered && ui::live() && rl::is_mouse_button_released(rl::RLMouseButton.LEFT))
 		{
-			activated = last_click_row == i && ui::now - last_click_time <= 0.4;
+			activated = !ctrl && !shift && last_click_row == i && ui::now - last_click_time <= 0.4;
+			if (collapse_row == i - parent_rows && !dragging) select_only(collapse_row);
+			collapse_row = -1;
 			last_click_row = activated ? -1 : i;
 			last_click_time = ui::now;
 		}
@@ -398,24 +495,57 @@ fn void frame() => @pool()
 			else if (hovered) { ui::panel(row, ui::BG1, 4); }
 			ui::text(ui::I_UP, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, ui::YELLOW);
 			ui::text("../", row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, text_size, ui::FG);
-			if (clicked) { select_entry(-2); go_up = true; }
+			if (clicked) { select_only(-2); go_up = true; }
 			continue;
 		}
 		int vi = i - parent_rows;
 		sys::Entry* entry = &entries[visible[vi]];
-		if (selected == vi) { ui::panel(row, ui::BG2, 4); }
+		if (marked[vi]) { ui::panel(row, ui::BG2, 4); }
 		else if (hovered) { ui::panel(row, ui::BG1, 4); }
+		if (selected == vi && (marked_count > 1 || !marked[vi])) ui::outline(row, ui::BG4, 4);
 		ui::text(entry.dir ? ui::I_FOLDER : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, entry.dir ? ui::YELLOW : ui::GRAY);
 		ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, ui::FG);
 		if (clicked)
 		{
-			select_entry(vi);
-			if (entry.dir)
+			collapse_row = -1;
+			if (shift)
 			{
-				pressed_entry = visible[vi];
-				press_at = rl::get_mouse_position();
-				dragging = false;
-				txt::set(&drag_path, txt::join(txt::view(&directory), txt::view(&entry.name)));
+				if (anchor < 0) anchor = selected >= 0 ? selected : vi;
+				if (!ctrl) clear_marks();
+				mark_range(anchor, vi);
+				select_entry(vi);
+			}
+			else if (ctrl)
+			{
+				mark(vi, !marked[vi]);
+				anchor = vi;
+				select_entry(vi);
+			}
+			else if (marked[vi] && marked_count > 1)
+			{
+				// Keep the selection so it can be dragged; a plain release collapses it.
+				collapse_row = vi;
+				anchor = vi;
+				select_entry(vi);
+			}
+			else
+			{
+				select_only(vi);
+			}
+			drag_dirs = 0;
+			if (!ctrl && !shift && marked[vi])
+			{
+				if (marked_count > 1)
+				{
+					for (int k = 0; k < visible_count; k++) if (marked[k] && entries[visible[k]].dir) drag_dirs++;
+				}
+				if (entry.dir || drag_dirs)
+				{
+					pressed_entry = visible[vi];
+					press_at = rl::get_mouse_position();
+					dragging = false;
+					txt::set(&drag_path, txt::join(txt::view(&directory), txt::view(&entry.name)));
+				}
 			}
 		}
 		// Activate only after a completed double-click, never after a drag.
@@ -426,6 +556,7 @@ fn void frame() => @pool()
 	ui::scrollbar(list, scroll, content);
 	// Navigate after drawing: do not mutate the entry array during iteration.
 	if (go_up) { go(txt::dirname(txt::view(&directory))); }
+	else if (multi_enter && launch_marked()) {}
 	else if (enter >= 0)
 	{
 		String path = txt::join(txt::view(&directory), txt::view(&entries[enter].name));
@@ -435,8 +566,14 @@ fn void frame() => @pool()
 	if (show_preview && preview::active) preview::draw(preview_panel);
 	ui::panel({ 0, h - 28, w, 28 }, ui::BG_HARD);
 	ui::text(txt::view(&status), 16, h - 22, 16, ui::GRAY);
+	if (marked_count != sel_status_count)
+	{
+		sel_status_count = marked_count;
+		txt::set(&sel_status, marked_count > 1 ? string::tformat("%d selected", marked_count) : "");
+	}
+	if (!txt::empty(&sel_status)) ui::text(txt::view(&sel_status), w - 16 - ui::text_w(txt::view(&sel_status), 16), h - 22, 16, ui::FG4);
 	finish_drag(h);
-	if (rl::is_mouse_button_released(rl::RLMouseButton.LEFT) || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) pressed_row = -1;
+	if (rl::is_mouse_button_released(rl::RLMouseButton.LEFT) || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { pressed_row = -1; collapse_row = -1; }
 	settings::draw();
 	ui::frame_end();
 }

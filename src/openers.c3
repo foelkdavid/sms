@@ -132,7 +132,7 @@ fn bool matches(String patterns, String name)
 }
 
 // Explicit activation only. Prepare arguments before fork; never invoke a shell or wait synchronously.
-fn void launch(String path) => @pool()
+fn bool launch(String path) => @pool()
 {
 	char[256] name;
 	txt::set(&name, txt::basename(path));
@@ -141,18 +141,18 @@ fn void launch(String path) => @pool()
 	{
 		if (matches(txt::view(&rules[i].pattern), txt::view(&name))) { rule = i; break; }
 	}
-	if (rule < 0) { ui::toast("No matching file opener. Configure one with Ctrl+K.", ui::RED); return; }
+	if (rule < 0) { ui::toast("No matching file opener. Configure one with Ctrl+K.", ui::RED); return false; }
 	int slot = -1;
 	for (int i = 0; i < children.len; i++) if (!children[i]) { slot = i; break; }
-	if (slot < 0) { ui::toast("All 16 opener process slots are busy", ui::RED); return; }
+	if (slot < 0) { ui::toast("All 16 opener process slots are busy", ui::RED); return false; }
 	char[4096] filename;
 	txt::set(&filename, path);
 	char[1024] executable;
 	txt::set(&executable, txt::view(&rules[rule].executable).trim());
-	if (txt::empty(&executable)) { ui::toast("This opener has no executable", ui::RED); return; }
+	if (txt::empty(&executable)) { ui::toast("This opener has no executable", ui::RED); return false; }
 	ZString[3] argv = { txt::z(&executable), txt::z(&filename), null };
 	int pid = sys::c_fork();
-	if (pid < 0) { ui::toast("Could not launch file opener", ui::RED); return; }
+	if (pid < 0) { ui::toast("Could not launch file opener", ui::RED); return false; }
 	if (pid == 0)
 	{
 		sys::c_execvpe(argv[0], &argv[0], sys::environ);
@@ -160,6 +160,7 @@ fn void launch(String path) => @pool()
 	}
 	children[slot] = pid;
 	active_children++;
+	return true;
 }
 
 // Bounded non-blocking reaping; no filesystem work.
