@@ -189,7 +189,7 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 		case COUNT: txt::set(&title, string::tformat("Counting %s", what));
 		case RESTORE: txt::set(&title, string::tformat("Restoring %s", what));
 	}
-	if (elevated) txt::append(&title, " as administrator");
+	if (elevated) txt::append(&title, " as sudo");
 	txt::set(&detail, "Preparing…");
 	job.status(&cur);
 	return true;
@@ -486,14 +486,11 @@ fn void draw_dialogs() => @pool()
 		Rect box = ui::dialog(560, 264);
 		bool cancel = ui::dialog_header(box, ui::I_LOCK, "Permission denied") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
 		ui::text_fit(txt::view(&admin_error), box.x + 20, box.y + 60, box.width - 40, 14, ui::FG4);
-		String ask = admin_delete
-			? "Delete permanently as administrator? (Root's trash is not yours, so nothing goes to the trash.)"
-			: "Enter your password to do this as administrator. It counts for this operation only.";
-		ui::text_fit(ask, box.x + 20, box.y + 86, box.width - 40, 14, ui::FG);
+		if (admin_delete) ui::text_fit("Root can't use your trash: this deletes permanently.", box.x + 20, box.y + 86, box.width - 40, 14, ui::FG);
 		bool submitted;
 		ui::secret_input(ID_ADMIN_PW, { box.x + 20, box.y + 118, box.width - 40, 40 }, &admin_pw, "Password for sudo", &submitted);
 		if (ui::button({ box.x + 20, box.y + 196, 200, 40 }, "Cancel")) cancel = true;
-		bool go = ui::button({ box.x + box.width - 260, box.y + 196, 240, 40 }, admin_delete ? "Delete as administrator" : "Retry as administrator", admin_delete ? DANGER : PRIMARY) || submitted;
+		bool go = ui::button({ box.x + box.width - 260, box.y + 196, 240, 40 }, admin_delete ? "Delete as sudo" : "Retry as sudo", admin_delete ? DANGER : PRIMARY) || submitted;
 		if (go)
 		{
 			admin_open = false;
