@@ -50,6 +50,12 @@ bool[MAX_ENTRIES] cut_entry; // By entry index; dimmed while their cut is on the
 bool any_cut;
 char[4096] trash_files; // $XDG_DATA_HOME/Trash/files, resolved once at startup.
 bool drop_trash; // The current drag is over the sidebar's Trash row; reset every frame.
+// What the pointer is over this frame, for drops from other apps (set while drawing; no copies).
+String hover_place; // sidebar place path (stable storage) or ""
+bool hover_place_trash;
+int hover_dir_entry = -1; // folder row
+bool hover_parent_row;
+Rect list_rect;
 int origin_entry = -1; // Entry whose trash origin is in origin_tip (one cached record, read on hover change only).
 char[4200] origin_tip;
 // Bottom bar: details of the selection, rebuilt only when the selection or listing changes.
@@ -554,6 +560,8 @@ fn void sidebar_location(Rect row, String path, String name, String icon, bool t
 	if (path == txt::view(&directory)) ui::panel(row, ui::BG2, 4);
 	if (ui::hover(row))
 	{
+		hover_place = path;
+		hover_place_trash = trash;
 		ui::panel(row, ui::BG1, 4);
 		if (dragging && path != txt::view(&directory))
 		{
@@ -895,6 +903,37 @@ fn bool launch_marked() => @pool()
 	return true;
 }
 
+<*
+ Files dropped from another app (file manager): copied into the folder under the pointer (folder row, ../,
+ sidebar place) or the shown folder; onto Trash they are trashed. Handled once per drop, never per frame.
+*>
+fn void drop_from_app() => @pool()
+{
+	rl::RLFilePathList dropped = rl::load_dropped_files();
+	defer rl::unload_dropped_files(dropped);
+	if (ui::top != 0 || !dropped.count) return;
+	String target;
+	if (hover_place.len) { target = hover_place; }
+	else if (hover_parent_row) { target = txt::dirname(txt::view(&directory)); }
+	else if (hover_dir_entry >= 0) { target = txt::join(txt::view(&directory), txt::view(&entries[hover_dir_entry].name)); }
+	else if (ui::point_in(rl::get_mouse_position(), list_rect)) { target = txt::view(&directory); }
+	else { return; }
+	// One operation works inside one source folder: the usual case for a file-manager drag.
+	String from = txt::dirname(dropped.paths[0].str_view());
+	String[] names = mem::talloc_array(String, dropped.count);
+	for (uint i = 0; i < dropped.count; i++)
+	{
+		String path = dropped.paths[i].str_view();
+		if (!path.starts_with("/") || txt::dirname(path) != from) { ui::toast("Drop items from one folder at a time", ui::RED); return; }
+		names[i] = txt::basename(path);
+	}
+	if (hover_place_trash) { ops::remove(from, names, in_trash()); return; }
+	char[4096] real;
+	sys::realpath(&real, from);
+	if (txt::view(&real) == target) { ui::toast("Already in this folder", ui::YELLOW); return; }
+	ops::transfer(txt::view(&real), names, target, true);
+}
+
 fn void finish_drag(float h)
 {
 	Rect bar = { 0, 60, SIDE_W, h - 88 };
@@ -910,23 +949,7 @@ fn void finish_drag(float h)
 		pressed_entry = -1;
 		dragging = false;
 	}
-	// External file-manager drops are checked once per drop, never every frame.
-	if (rl::is_file_dropped())
-	{
-		rl::RLFilePathList dropped = rl::load_dropped_files();
-		defer rl::unload_dropped_files(dropped);
-		if (over_bar && ui::top == 0)
-		{
-			for (uint i = 0; i < dropped.count; i++)
-			{
-				String path = dropped.paths[i].str_view();
-				if (!sys::is_dir(path)) continue;
-				char[4096] resolved;
-				sys::realpath(&resolved, path);
-				add_location(txt::view(&resolved));
-			}
-		}
-	}
+	if (rl::is_file_dropped()) drop_from_app();
 	if (dragging)
 	{
 		rl::RLVector2 mouse = rl::get_mouse_position();
@@ -953,6 +976,10 @@ fn void frame() => @pool()
 	ops::poll();
 	if (ops::take_refresh()) reload();
 	drop_target[0] = 0;
+	hover_place = "";
+	hover_place_trash = false;
+	hover_dir_entry = -1;
+	hover_parent_row = false;
 	drop_trash = false;
 	if (prefs::trash) ops::poll_trash_size(txt::dirname(txt::view(&trash_files)));
 	if (ui::ctrl_down() && ui::letter('k') && !ops::modal())
@@ -1104,6 +1131,7 @@ fn void frame() => @pool()
 		}
 	}
 	Rect list = { left, 68 + bar_h, list_w, main_h - bar_h };
+	list_rect = list;
 	Rect preview_panel = { w - preview_w - 8, 68, preview_w, main_h };
 	Rect ops_panel = { left, 68 + main_h + 8, w - left - 8, ops_h };
 	int parent_rows = txt::view(&directory) == "/" || !txt::empty(&search) || deep ? 0 : 1;
@@ -1191,6 +1219,7 @@ fn void frame() => @pool()
 			{
 				if (selected == -2) { ui::panel(row, ui::BG2, 4); }
 				else if (hovered) { ui::panel(row, ui::BG1, 4); }
+				if (hovered) hover_parent_row = true;
 				if (dragging && hovered)
 				{
 					txt::set(&drop_target, txt::dirname(txt::view(&directory)));
@@ -1206,6 +1235,7 @@ fn void frame() => @pool()
 			if (marked[vi]) { ui::panel(row, ui::BG2, 4); }
 			else if (hovered) { ui::panel(row, ui::BG1, 4); }
 			if (selected == vi && (marked_count > 1 || !marked[vi])) ui::outline(row, ui::BG4, 4);
+			if (hovered && entry.dir) hover_dir_entry = visible[vi];
 			bool drop_here = dragging && hovered && entry.dir && !marked[vi];
 			if (drop_here)
 			{

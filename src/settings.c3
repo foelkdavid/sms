@@ -17,7 +17,7 @@ struct Shortcut
 	String action;
 	bool heading;
 }
-Shortcut[41] shortcuts = {
+Shortcut[42] shortcuts = {
 	{ "NAVIGATION", "", true },
 	{ "Up / Down", "Move selection (hold to repeat)", false },
 	{ "Enter", "Open selected folder, or open selected files", false },
@@ -38,6 +38,7 @@ Shortcut[41] shortcuts = {
 	{ "Delete", "Move to trash (or delete, see General)", false },
 	{ "Shift + Delete", "Delete permanently (asks first)", false },
 	{ "Drag onto a folder", "Move there; hold Ctrl to copy", false },
+	{ "Drop from another app", "Copy into the folder under the pointer (Trash: trash)", false },
 	{ "Restore (in Trash)", "Put selected items back where they came from", false },
 	{ "SEARCH & VIEW", "", true },
 	{ "Ctrl + F", "Search this folder", false },
