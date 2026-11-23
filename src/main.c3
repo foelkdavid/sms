@@ -1196,7 +1196,7 @@ fn void frame() => @pool()
 					txt::set(&drop_target, txt::dirname(txt::view(&directory)));
 					ui::outline(row, ui::AQUA, 4, 2);
 				}
-				ui::text(ui::I_UP, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, ui::YELLOW);
+				ui::text(ui::I_FOLDER, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, ui::BG4);
 				ui::text("../", row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, text_size, ui::FG);
 				if (clicked) { select_only(-2); go_up = true; }
 				continue;
