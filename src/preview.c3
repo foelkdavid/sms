@@ -80,7 +80,7 @@ fn void draw(Rect panel)
 		return;
 	}
 	if (!texture.id || area.width <= 0 || area.height <= 0) return;
-	float factor = math::min(1 / ui::scale, math::min(area.width / (float)texture.width, area.height / (float)texture.height));
+	float factor = math::min(1 / ui::px, math::min(area.width / (float)texture.width, area.height / (float)texture.height));
 	float w = (float)texture.width * factor;
 	float h = (float)texture.height * factor;
 	Rect target = { area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h };
