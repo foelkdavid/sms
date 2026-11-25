@@ -411,19 +411,20 @@ fn void update_busy() => @pool()
 	{
 		String name = txt::view(&entries[i].name);
 		fileop::BusyHit h = run ? ops::running.find(dir, name) : {};
-		if (h.found && h.own)
+		if (h.found && h.own && !h.queued)
 		{
-			// Left out of its operation (cancel_item): free again although the job still runs.
+			// Left out of its operation (cancel_item): free at once although the job still runs.
 			fileop::ItemProgress ip;
-			if (ops::item_status(h.job, h.item, &ip) && ip.state == CANCELLED) h.found = false;
+			if (ops::item_status(h.job, h.item, &ip) && (ip.state == CANCELLED || ip.leaving)) h.found = false;
 		}
+		if (h.found && h.own && h.queued) h.found = false;   // this window's queue: answered below, always current
 		char q = h.found || !queued ? 0 : ops::queued_kind(dir, name);
 		if (!h.found && !q) continue;
 		busy_kind[i] = h.found ? (char)((int)h.kind + 1) : q;
 		busy_item[i] = h.item;
 		busy_job[i] = h.job;
 		busy_own[i] = h.found && h.own;
-		busy_queued[i] = !h.found;
+		busy_queued[i] = !h.found || h.queued;
 		any_busy = true;
 	}
 	// Items that just became busy leave the selection (they cannot be acted on now).
@@ -622,7 +623,7 @@ fn void poll_watch()
 {
 	if (watch.changed() && watch_due == 0) watch_due = math::max(ui::now + 0.15, watch_last + 0.5);
 	if (watch_due == 0 || ui::now < watch_due) return;
-	if (arc::active || deep || ops::busy() || ops::modal() || ui::top != 0 || pressed_entry >= 0 || dragging || band_pending || banding || ui::focused(ID_PATH)) return;
+	if (arc::active || deep || ops::modal() || ui::top != 0 || pressed_entry >= 0 || dragging || band_pending || banding || ui::focused(ID_PATH)) return;
 	watch_due = 0;
 	watch_last = ui::now;
 	reload();

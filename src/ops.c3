@@ -161,6 +161,7 @@ struct Op
 	double recent_speed;       // bytes / s over the last few seconds (smoothed), 0 = none yet
 	double shown_eta;          // seconds left as displayed: counts down, nudged toward the estimate (-1 = none yet)
 	double eta_active;         // active_time when shown_eta was last updated
+	char[4096] record;         // queued: its record in bmu's registry (other windows mark its items "Queued …")
 	bool show_items;           // its panel lists each item (click on the panel)
 	float items_scroll;
 	bool items_follow;         // keep the active item in view until the user scrolls
@@ -285,7 +286,7 @@ fn bool take_refresh()
 
 fn void close()
 {
-	foreach (&o : slots) { o.job.close(); o.req.free(); o.state = FREE; }
+	foreach (&o : slots) { o.job.close(); dequeue(o); o.req.free(); }
 	running.close();
 	counter.close();
 	ui::wipe(&admin_pw);
@@ -369,14 +370,16 @@ fn Op* begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir =
 	{
 		o.state = QUEUED;
 		marks_dirty = true;
+		fileop::publish_queued(&o.job, o.kind, src_dir, o.req.tview(), &o.record);
 		return o;
 	}
 	return start_op(o, password) ? o : null;
 }
 
-fn void set_title(Op* o, String src_dir) => @pool()
+fn void set_title(Op* o, String src_dir, int count = -1) => @pool()
 {
-	String what = o.req.count == 1 ? string::tformat("\"%s\"", o.req.at(0)) : string::tformat("%d items", o.req.count);
+	if (count < 0) count = o.req.count;
+	String what = o.req.count == 1 ? string::tformat("\"%s\"", o.req.at(0)) : string::tformat("%d %s", count, plural(count, "item", "items"));
 	if (o.kind == EXTRACT && !o.req.count) what = string::tformat("\"%s\"", txt::basename(src_dir));
 	String target = txt::view(&o.target);
 	switch (o.kind)
@@ -419,7 +422,8 @@ fn bool start_op(Op* o, char[] password = {}) => @pool()
 	else if (o.elevated) { ok = o.job.start_elevated(o.kind, src, names, txt::view(&o.dst), password, o.fallback); }
 	else { ok = o.job.start(o.kind, src, names, txt::view(&o.dst), o.fallback); }
 	marks_dirty = true;
-	if (!ok) { ui::toast("Could not start the file operation", ui::RED); o.state = FREE; return false; }
+	if (!ok) { ui::toast("Could not start the file operation", ui::RED); dequeue(o); return false; }
+	o.record[0] = 0;   // the job's own record replaces the queued one (same name)
 	o.state = RUNNING;
 	o.started = ui::now;
 	o.sample_time = ui::now;
@@ -678,7 +682,7 @@ fn void poll() => @pool()
 		}
 		bool was_removing = o.cur.remove_total > 0;
 		o.job.status(&o.cur);
-		if (o.cur.dropped != o.dropped_seen) { o.dropped_seen = o.cur.dropped; marks_dirty = true; } // left-out items are free again
+		if (o.cur.dropped != o.dropped_seen) { o.dropped_seen = o.cur.dropped; marks_dirty = true; } // left-out items are free again (once put back)
 		if (o.cur.remove_total > 0 && !was_removing) { o.shown_frac = 0; o.sample_time = 0; } // new step: bar restarts, text now
 		double dt = math::min(ui::now - o.last_poll, 0.25);
 		if (o.cur.state != SCANNING && o.cur.state != CONFLICT) o.active_time += dt;
@@ -979,7 +983,7 @@ fn float queued_rows_height(Op* o, int shown)
 fn void unqueue_item(Op* o, int i) => @pool()
 {
 	marks_dirty = true;
-	if (o.req.count <= 1) { o.state = FREE; return; }
+	if (o.req.count <= 1) { dequeue(o); return; }
 	String[] keep = mem::talloc_array(String, (usz)o.req.count - 1);
 	int n;
 	for (int k = 0; k < o.req.count; k++) if (k != i) keep[n++] = o.req.at(k).tcopy();   // copies: set() rewrites the buffer
@@ -987,6 +991,15 @@ fn void unqueue_item(Op* o, int i) => @pool()
 	o.req.set(dir, keep[:n]);
 	o.items = n;
 	set_title(o, dir);
+	fileop::publish_queued(&o.job, o.kind, dir, o.req.tview(), &o.record);
+}
+
+<* Free a slot that is not running (queued request dropped, or a start that failed). *>
+fn void dequeue(Op* o)
+{
+	fileop::unpublish(&o.record);
+	o.state = FREE;
+	marks_dirty = true;
 }
 
 <* Height of the docked panels this frame (0 = none). *>
@@ -1000,14 +1013,14 @@ fn float panel_height()
 }
 
 <* The panel can list its items: more than one, tracked by bmu (not archives, sizing or elevated jobs). *>
-fn bool has_items(Op* o) => o.state == RUNNING && o.job.item_count() > 1;
+fn bool has_items(Op* o) => o.state == RUNNING && o.job.item_count() > 1 && o.job.items_kept() > 0;
 
 <* Height of the item rows under the bar (0 = collapsed): six rows (three with several panels), at most about a
    third of the window. *>
 fn float items_height(Op* o, int shown)
 {
 	if (!o.show_items || !has_items(o)) return 0;
-	float rows = (float)math::min(o.job.item_count(), shown > 1 ? 3 : ITEM_ROWS_MAX);
+	float rows = (float)math::min(o.job.items_kept(), shown > 1 ? 3 : ITEM_ROWS_MAX);
 	float room = math::max(ITEM_ROW * 2, ui::sh() * 0.35f - PANEL_H);
 	return math::min(rows * ITEM_ROW, room) + 8;
 }
@@ -1049,11 +1062,7 @@ fn void draw_queued(Op* o, Rect r, int shown)
 	ui::text(ui::I_CLOCK, x, r.y + 14, 16, ui::GRAY);
 	ui::text_fit(txt::view(&o.title), x + 28, r.y + 7, r.width - 100, 15, ui::FG4);
 	ui::text_fit(prefs::operations == prefs::OPS_QUEUE ? "Waiting: starts when the earlier operations are done" : "Waiting: starts when the transfer on the same drive is done", x + 28, r.y + 26, r.width - 100, 12, ui::GRAY);
-	if (ui::icon_button({ r.x + r.width - 44, r.y + 8, 32, 30 }, ui::I_TIMES, ui::FG4, "Remove from the queue"))
-	{
-		o.state = FREE;
-		marks_dirty = true;
-	}
+	if (ui::icon_button({ r.x + r.width - 44, r.y + 8, 32, 30 }, ui::I_TIMES, ui::FG4, "Remove from the queue")) dequeue(o);
 }
 
 fn void draw_queued_items(Op* o, Rect list) => @pool()
@@ -1139,21 +1148,22 @@ fn bool can_drop(Op* o, fileop::ItemProgress* it)
 <* The expanded panel: one row per item (icon, name, own bar, size, ✕), virtualized, following the active item. *>
 fn void draw_items(Op* o, Rect list) => @pool()
 {
-	int n = o.job.item_count();
+	int n = o.job.items_kept();   // left-out items are gone from the list at once (their undo runs on the worker)
 	ui::hline(list.x, list.y - 4, list.width, ui::BG2);
 	float content = (float)n * ITEM_ROW;
 	float wheel = ui::scroll_wheel(list, o.items_scroll, content);
 	if (wheel != o.items_scroll) { o.items_scroll = wheel; o.items_follow = false; }
 	if (o.items_follow && o.cur.item >= 0)
 	{
-		float top = (float)o.cur.item * ITEM_ROW;
+		// Row of the active item among the kept ones (left-out items before it are not shown).
+		float top = (float)math::max(0, o.cur.item - o.cur.dropped) * ITEM_ROW;
 		if (top < o.items_scroll) o.items_scroll = top;
 		if (top + ITEM_ROW > o.items_scroll + list.height) o.items_scroll = top + ITEM_ROW - list.height;
 		o.items_scroll = math::max(0.0f, math::min(o.items_scroll, content - list.height));
 	}
 	int first = (int)(o.items_scroll / ITEM_ROW);
 	int want = math::min((int)(list.height / ITEM_ROW) + 2, (int)item_rows.len);
-	int got = o.job.item_status(first, item_rows[:want]);
+	int got = o.job.item_status(first, item_rows[:want], true);
 	ui::begin_clip(list);
 	float xw = 30;   // the ✕ at the right end
 	float nw = list.width * 0.46f;
@@ -1174,7 +1184,6 @@ fn void draw_items(Op* o, Rect list) => @pool()
 			case CANCELLED: icon = ui::I_TIMES; ic = ui::GRAY;
 			default: break;
 		}
-		if (it.leaving) { icon = ui::I_UNDO; ic = ui::YELLOW; }
 		ui::text(icon, list.x + 2, y + 5, 14, ic);
 		ui::text_fit(txt::view(&it.name), list.x + 24, y + 5, nw, 14, it.state == WAITING || it.state == CANCELLED ? ui::FG4 : ui::FG);
 		float f = it.bytes_total ? (float)it.bytes_done / (float)it.bytes_total : it.files_total ? (float)it.files_done / (float)it.files_total : 0;
@@ -1186,8 +1195,7 @@ fn void draw_items(Op* o, Rect list) => @pool()
 		}
 		char[32] a, b;
 		String size;
-		if (it.leaving) { size = it.state == WAITING ? "leaving out…" : "putting back…"; }
-		else if (it.state == SKIPPED) { size = "skipped"; }
+		if (it.state == SKIPPED) { size = "skipped"; }
 		else if (it.state == CANCELLED) { size = "left out"; }
 		else if (it.bytes_total && it.state == ACTIVE)
 		{
@@ -1200,7 +1208,12 @@ fn void draw_items(Op* o, Rect list) => @pool()
 		ui::text_fit(size, sx, y + 6, list.x + list.width - sx - xw - 8, 12, ui::GRAY);
 		if (can_drop(o, it) && ui::icon_button({ list.x + list.width - xw - 6, y + 1, 24, 24 }, ui::I_TIMES, ui::GRAY, it.state == WAITING ? "Leave this item out" : "Leave this item out and put it back"))
 		{
-			if (!o.job.cancel_item(first + k)) ui::toast("This item can't be put back any more", ui::YELLOW);
+			if (!o.job.cancel_item(it.index)) { ui::toast("This item can't be put back any more", ui::YELLOW); }
+			else
+			{
+				marks_dirty = true;   // it is no longer part of the operation: unmarked in the list now
+				set_title(o, txt::view(&o.req.dir), o.job.items_kept());
+			}
 		}
 	}
 	ui::end_clip();
