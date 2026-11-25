@@ -9,6 +9,8 @@ import sms::prefs, sms::openers;
 // job's worker; this module only polls it once per frame (one lock, no I/O).
 
 const float PANEL_H = 84;
+const float ITEM_ROW = 26;     // per-item rows of the expanded progress panel
+const int ITEM_ROWS_MAX = 6;   // rows shown at once (the rest scroll)
 
 // Bounded list of names inside one folder, heap storage reused between operations (no per-frame use).
 struct Names
@@ -141,6 +143,10 @@ double sample_active;
 double recent_speed;           // bytes / s over the last few seconds (smoothed), 0 = none yet
 double shown_eta;              // seconds left as displayed: counts down, nudged toward the estimate (-1 = none yet)
 double eta_active;             // active_time when shown_eta was last updated
+bool show_items;               // the progress panel lists each item (toggled by a click on it; kept for the session)
+float items_scroll;
+bool items_follow;             // keep the active item in view until the user scrolls
+fileop::ItemProgress[16] item_rows; // visible rows only (one item_status call per frame)
 
 fn bool busy() => job.busy();
 fn bool modal() => confirm_open || admin_open || new_open || ui::close_requested || (job.busy() && cur.state == CONFLICT);
@@ -254,6 +260,8 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 	sample_active = 0;
 	recent_speed = 0;
 	shown_eta = -1;
+	items_scroll = 0;
+	items_follow = true;
 	apply_all = false;
 	if (kind != EXTRACT) open_after[0] = 0;
 	String what = names.len == 1 ? string::tformat("\"%s\"", names[0]) : string::tformat("%d items", names.len);
@@ -762,7 +770,19 @@ fn void update_detail() => @pool()
 }
 
 <* Height of the docked progress bar this frame (0 = hidden). Instant jobs never flash it. *>
-fn float panel_height() => job.busy() && (ui::now - job_started > 0.25 || cur.state == CONFLICT) ? PANEL_H : 0;
+fn float panel_height() => job.busy() && (ui::now - job_started > 0.25 || cur.state == CONFLICT) ? PANEL_H + items_height() : 0;
+
+<* The panel can list its items: more than one, tracked by bmu (not archives, sizing or elevated jobs). *>
+fn bool has_items() => job.item_count() > 1;
+
+<* Height of the item rows under the bar (0 = collapsed): at most ITEM_ROWS_MAX rows and about a third of the window. *>
+fn float items_height()
+{
+	if (!show_items || !has_items()) return 0;
+	float rows = (float)math::min(job.item_count(), ITEM_ROWS_MAX);
+	float room = math::max(ITEM_ROW * 2, ui::sh() * 0.35f - PANEL_H);
+	return math::min(rows * ITEM_ROW, room) + 8;
+}
 
 <* Docked progress bar (layer 0) below the file list. *>
 fn void draw_panel(Rect r)
@@ -773,10 +793,18 @@ fn void draw_panel(Rect r)
 	float x = r.x + 14;
 	float w = r.width - 28;
 	String icon = job_kind == TRASH || job_kind == DELETE ? ui::I_TRASH : job_kind == MOVE ? ui::I_CUT : job_kind == RESTORE ? ui::I_UNDO : job_kind == EXTRACT ? ui::I_FILE_ARCHIVE : ui::I_COPY;
+	bool items = has_items();
+	Rect head = { r.x, r.y, r.width - 88, PANEL_H };
+	if (items && ui::hover(head)) { ui::outline(r, ui::BG3, 6); ui::tooltip(show_items ? "Hide the items" : "Show each item"); }
 	ui::text(icon, x, r.y + 12, 18, ui::AQUA);
-	ui::text_fit(txt::view(&title), x + 28, r.y + 13, w - 76, 16, ui::FG);
+	ui::text_fit(txt::view(&title), x + 28, r.y + 13, w - (items ? 112 : 76), 16, ui::FG);
 	bool can = cur.can_cancel;
 	if (ui::icon_button({ r.x + r.width - 44, r.y + 8, 32, 30 }, ui::I_TIMES, can ? ui::FG4 : ui::BG3, can ? "Cancel (changes are rolled back)" : "Finishing…") && can) job.cancel();
+	if (items && (ui::icon_button({ r.x + r.width - 80, r.y + 8, 32, 30 }, show_items ? ui::I_UP : ui::I_DOWN, ui::FG4, show_items ? "Hide the items" : "Show each item") || ui::clicked(head)))
+	{
+		show_items = !show_items;
+		items_follow = true;
+	}
 	float frac = shown_frac;
 	Rect bar = { x, r.y + 42, w, 8 };
 	ui::panel(bar, ui::BG1, 4);
@@ -795,6 +823,70 @@ fn void draw_panel(Rect r)
 	ui::text_fit(txt::view(&detail), x, r.y + 59, w * 0.6f, 14, ui::FG4);
 	String current = txt::view(&cur.current);
 	if (current != "Undoing") ui::text_tail(current, x + w * 0.6f + 8, r.y + 59, w * 0.4f - 8, 14, ui::GRAY);
+	float ih = items_height();
+	if (ih > 0) draw_items({ x, r.y + PANEL_H, w, ih - 8 });
+}
+
+<* The expanded panel: one row per item (icon, name, own bar, size), virtualized, following the active item. *>
+fn void draw_items(Rect list) => @pool()
+{
+	int n = job.item_count();
+	ui::hline(list.x, list.y - 4, list.width, ui::BG2);
+	float content = (float)n * ITEM_ROW;
+	float wheel = ui::scroll_wheel(list, items_scroll, content);
+	if (wheel != items_scroll) { items_scroll = wheel; items_follow = false; }
+	if (items_follow && cur.item >= 0)
+	{
+		float top = (float)cur.item * ITEM_ROW;
+		if (top < items_scroll) items_scroll = top;
+		if (top + ITEM_ROW > items_scroll + list.height) items_scroll = top + ITEM_ROW - list.height;
+		items_scroll = math::max(0.0f, math::min(items_scroll, content - list.height));
+	}
+	int first = (int)(items_scroll / ITEM_ROW);
+	int want = math::min((int)(list.height / ITEM_ROW) + 2, (int)item_rows.len);
+	int got = job.item_status(first, item_rows[:want]);
+	ui::begin_clip(list);
+	float nw = list.width * 0.52f;
+	float bx = list.x + 24 + nw + 12;
+	float bw = math::max(40.0f, list.width * 0.18f);
+	float sx = bx + bw + 12;
+	for (int k = 0; k < got; k++)
+	{
+		fileop::ItemProgress* it = &item_rows[k];
+		float y = list.y + (float)(first + k) * ITEM_ROW - items_scroll;
+		String icon = ui::I_CLOCK;
+		Color ic = ui::BG3;
+		switch (it.state)
+		{
+			case DONE: icon = ui::I_CHECK; ic = ui::GREEN;
+			case ACTIVE: icon = ui::I_RIGHT; ic = ui::AQUA;
+			case SKIPPED: icon = ui::I_FORWARD; ic = ui::YELLOW;
+			default: break;
+		}
+		ui::text(icon, list.x + 2, y + 5, 14, ic);
+		ui::text_fit(txt::view(&it.name), list.x + 24, y + 5, nw, 14, it.state == WAITING ? ui::FG4 : ui::FG);
+		float f = it.bytes_total ? (float)it.bytes_done / (float)it.bytes_total : it.files_total ? (float)it.files_done / (float)it.files_total : it.state == DONE ? 1 : 0;
+		if (it.state == DONE) f = 1;
+		if (it.state == ACTIVE || it.state == DONE)
+		{
+			ui::panel({ bx, y + 10, bw, 6 }, ui::BG1, 3);
+			if (f > 0) ui::panel({ bx, y + 10, math::max(6.0f, bw * math::min(f, 1.0f)), 6 }, it.state == ACTIVE ? ui::AQUA : ui::BG3, 3);
+		}
+		char[32] a, b;
+		String size;
+		if (it.state == SKIPPED) { size = "skipped"; }
+		else if (it.bytes_total && it.state == ACTIVE)
+		{
+			size_text(&a, it.bytes_done);
+			size_text(&b, it.bytes_total);
+			size = string::tformat("%s of %s", txt::view(&a), txt::view(&b));
+		}
+		else if (it.bytes_total) { size_text(&a, it.bytes_total); size = txt::view(&a); }
+		else if (it.files_total > 1) { size = string::tformat("%d items", it.files_total); }
+		ui::text_fit(size, sx, y + 6, list.x + list.width - sx - 8, 12, ui::GRAY);
+	}
+	ui::end_clip();
+	ui::scrollbar(list, items_scroll, content);
 }
 
 <* Modal dialogs (layer 1): name conflict, delete confirmation, quit while busy. *>
