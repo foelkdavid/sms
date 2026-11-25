@@ -49,10 +49,11 @@ bool[MAX_ENTRIES] band_base;
 bool[MAX_ENTRIES] cut_entry; // By entry index; dimmed while their cut is on the clipboard.
 // Entries inside a running file operation (this window's or another sms window's, via bmu's fileop registry):
 // not selectable, drawn with a busy indicator. Recomputed on listing and on registry changes, never per frame.
-fileop::Busy busy;
 char[MAX_ENTRIES] busy_kind;  // by entry index: 0 = free, else fileop::Kind + 1
-int[MAX_ENTRIES] busy_item;   // its index in that job (own job: ops::job.item_status)
+int[MAX_ENTRIES] busy_item;   // its index in that job (own job: ops::item_status)
+ulong[MAX_ENTRIES] busy_job;  // that job's id (with busy_own)
 bool[MAX_ENTRIES] busy_own;
+bool[MAX_ENTRIES] busy_queued; // waits in a queued operation of this window
 bool any_busy;
 bool any_cut;
 bool was_focused = true;
@@ -222,9 +223,8 @@ fn int main(String[] args)
 	if (!navigate(start)) { io::eprintfn("sms: cannot read folder: %s", start); return 1; }
 	ui::open("sms", 900, 640, 480, 320, (float)prefs::ui_percent / 100);
 	ui::zoom_shift_only = true;
-	busy.open();
+	ops::running.open();
 	update_busy();
-	defer busy.close();
 	ui::load_font(&openwith::ICON_CODEPOINTS); // the program icons of "Open with" entries
 	defer ui::close();
 	defer preview::close();
@@ -363,7 +363,7 @@ fn void open_in_archive(String name) => @pool()
 {
 	if (!prefs::archive_open) { ui::toast("Archives are view only (Ctrl+K, General): extract files to open them", ui::YELLOW); return; }
 	if (openers::rule_for(name) < 0) { ui::toast("No matching file opener. Configure one with Ctrl+K.", ui::RED); return; }
-	if (ops::busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return; }
+	if (!ops::can_start()) { ui::toast("Too many file operations at once: wait for one to finish", ui::RED); return; }
 	String dir = arc::new_temp_dir();
 	if (!dir.len) { ui::toast("Cannot create a temporary folder", ui::RED); return; }
 	String[1] one = { name };
@@ -403,22 +403,36 @@ fn void update_busy() => @pool()
 {
 	if (any_busy) { for (int i = 0; i < entry_count; i++) busy_kind[i] = 0; }
 	any_busy = false;
-	if (arc::active || !busy.has_dir(txt::view(&directory))) return;
+	String dir = txt::view(&directory);
+	bool run = ops::running.has_dir(dir);
+	bool queued = ops::queued_in(dir);
+	if (arc::active || (!run && !queued)) return;
 	for (int i = 0; i < entry_count; i++)
 	{
-		fileop::BusyHit h = busy.find(txt::view(&directory), txt::view(&entries[i].name));
-		if (!h.found) continue;
-		busy_kind[i] = (char)((int)h.kind + 1);
+		String name = txt::view(&entries[i].name);
+		fileop::BusyHit h = run ? ops::running.find(dir, name) : {};
+		if (h.found && h.own)
+		{
+			// Left out of its operation (cancel_item): free again although the job still runs.
+			fileop::ItemProgress ip;
+			if (ops::item_status(h.job, h.item, &ip) && ip.state == CANCELLED) h.found = false;
+		}
+		char q = h.found || !queued ? 0 : ops::queued_kind(dir, name);
+		if (!h.found && !q) continue;
+		busy_kind[i] = h.found ? (char)((int)h.kind + 1) : q;
 		busy_item[i] = h.item;
-		busy_own[i] = h.own;
+		busy_job[i] = h.job;
+		busy_own[i] = h.found && h.own;
+		busy_queued[i] = !h.found;
 		any_busy = true;
 	}
 	// Items that just became busy leave the selection (they cannot be acted on now).
 	for (int vi = 0; vi < visible_count && any_busy && marked_count; vi++) if (marked[vi] && is_busy(vi)) mark(vi, false);
 }
 
-fn String busy_verb(char k)
+fn String busy_verb(char k, bool queued = false)
 {
+	if (queued) return "Queued";
 	switch ((fileop::Kind)(k - 1))
 	{
 		case COPY: return "Being copied";
@@ -475,13 +489,13 @@ fn void draw_busy_row(Rect row, sys::Entry* entry, char kind, int e, float icon_
 	c.a = (char)(255 * pulse);
 	float rx = row.x + row.width - 140;
 	ui::text(icon, rx, row.y + (row_h - 16) / 2, 16, c);
-	ui::text_fit(busy_verb(kind), rx + 24, row.y + (row_h - 13) / 2, 116, 13, ui::GRAY);
+	ui::text_fit(busy_verb(kind, busy_queued[e]), rx + 24, row.y + (row_h - 13) / 2, 116, 13, ui::GRAY);
 	if (!busy_own[e]) return;
-	fileop::ItemProgress[1] ip;
-	if (ops::job.item_status(busy_item[e], &ip) != 1) return;
-	float f = ip[0].bytes_total ? (float)ip[0].bytes_done / (float)ip[0].bytes_total : ip[0].files_total ? (float)ip[0].files_done / (float)ip[0].files_total : 0;
-	if (ip[0].state == DONE) f = 1;
-	if (ip[0].state == WAITING && f <= 0) return;
+	fileop::ItemProgress ip;
+	if (!ops::item_status(busy_job[e], busy_item[e], &ip)) return;
+	float f = ip.bytes_total ? (float)ip.bytes_done / (float)ip.bytes_total : ip.files_total ? (float)ip.files_done / (float)ip.files_total : 0;
+	if (ip.state == DONE) f = 1;
+	if (ip.state == WAITING && f <= 0) return;
 	float by = row.y + row_h - 8 * cs;
 	ui::panel({ tx, by, tw, 3 }, ui::BG1, 1);
 	if (f > 0) ui::panel({ tx, by, math::max(3.0f, tw * math::min(f, 1.0f)), 3 }, ui::AQUA, 1);
@@ -1180,7 +1194,7 @@ fn void file_menu() => @pool()
 	bool valid = menu_entry >= 0 && menu_entry < entry_count;
 	String name = valid ? txt::view(&entries[menu_entry].name) : "";
 	String path = valid ? txt::join(txt::view(&directory), name) : "";
-	bool idle = !ops::busy();
+	bool idle = ops::can_start();
 	if (arc::active)
 	{
 		// Inside an archive (read-only): open a temporary copy, or extract the selection.
@@ -1221,7 +1235,7 @@ fn void delete_items(bool valid, bool permanent)
 	if (!valid || deep) return;
 	bool forever = permanent || in_trash() || !prefs::trash;
 	ui::menu_sep();
-	if (ui::menu_item(forever ? "Delete permanently" : "Move to trash", ui::I_TRASH, permanent ? "Shift+Delete" : "Delete", !ops::busy(), danger: true))
+	if (ui::menu_item(forever ? "Delete permanently" : "Move to trash", ui::I_TRASH, permanent ? "Shift+Delete" : "Delete", ops::can_start(), danger: true))
 	{
 		ops::remove(txt::view(&directory), menu_names(), forever);
 	}
@@ -1273,7 +1287,7 @@ fn void trash_menu()
 {
 	if (!ui::menu_begin(MENU_TRASH, 220)) return;
 	if (ui::menu_item("Open", ui::I_FOLDER_OPEN, "")) { ensure_trash(); ops::size_dirty = true; go(txt::view(&trash_files)); }
-	if (ui::menu_item("Empty trash", ui::I_TRASH, "", !ops::busy(), danger: true)) ops::empty_trash(txt::view(&trash_files));
+	if (ui::menu_item("Empty trash", ui::I_TRASH, "", ops::can_start(), danger: true)) ops::empty_trash(txt::view(&trash_files));
 	ui::menu_end();
 }
 
@@ -1519,7 +1533,7 @@ fn void frame() => @pool()
 	if (focused && !was_focused && ops::sync_clipboard()) clear_cut();
 	was_focused = focused;
 	if (ops::take_refresh()) reload();
-	if (busy.poll()) update_busy();
+	if (ops::take_marks_dirty()) update_busy();
 	poll_watch();
 	poll_archive();
 	int why;
@@ -1726,8 +1740,8 @@ fn void frame() => @pool()
 		ui::panel(tb, ui::BG_HARD, 6);
 		ui::text(ui::I_TRASH, tb.x + 12, tb.y + 10, 18, ui::RED);
 		ui::text("Trash", tb.x + 40, tb.y + 11, 16, ui::FG);
-		if (ui::button({ tb.x + tb.width - 304, tb.y + 4, 148, 32 }, "Empty trash", DANGER, ui::I_TRASH, entry_count > 0 && !ops::busy())) ops::empty_trash(txt::view(&trash_files));
-		if (ui::button({ tb.x + tb.width - 148, tb.y + 4, 140, 32 }, "Restore", PRIMARY, ui::I_UNDO, marked_count > 0 && !ops::busy()))
+		if (ui::button({ tb.x + tb.width - 304, tb.y + 4, 148, 32 }, "Empty trash", DANGER, ui::I_TRASH, entry_count > 0 && ops::can_start())) ops::empty_trash(txt::view(&trash_files));
+		if (ui::button({ tb.x + tb.width - 148, tb.y + 4, 140, 32 }, "Restore", PRIMARY, ui::I_UNDO, marked_count > 0 && ops::can_start()))
 		{
 			ops::restore(txt::view(&directory), marked_names());
 		}
@@ -1738,7 +1752,7 @@ fn void frame() => @pool()
 		Rect tb = { left, 68, list_w - 10, 40 };
 		ui::panel(tb, ui::BG_HARD, 6);
 		ui::text(ui::I_FILE_ARCHIVE, tb.x + 12, tb.y + 10, 18, ui::AQUA);
-		bool can = arc::listed && !ops::busy();
+		bool can = arc::listed && ops::can_start();
 		String label = marked_count ? "Extract selected" : txt::empty(&arc::inner) ? "Extract all" : "Extract folder";
 		float bw = 150;
 		// "Archive (read-only)" then the archive's name; the label width is measured once.
@@ -1871,11 +1885,12 @@ fn void frame() => @pool()
 			if (bk)
 			{
 				// Part of a running operation: no selection, menus, drags or opening; a pulsing marker instead.
-				if (clicked) { pressed_row = -1; ui::toast(string::tformat("%s: wait until it is done", busy_verb(bk)), ui::YELLOW); }
+				bool bq = busy_queued[visible[vi]];
+				if (clicked) { pressed_row = -1; ui::toast(string::tformat("%s: wait until it is done", busy_verb(bk, bq)), ui::YELLOW); }
 				clicked = false;
 				activated = false;
 				if (ui::right_clicked(row)) row_menu = true;   // no menu (not the free-space one either)
-				if (hovered) ui::tooltip(busy_verb(bk));
+				if (hovered) ui::tooltip(busy_verb(bk, bq));
 				draw_busy_row(row, entry, bk, visible[vi], icon_size, text_size, row_h);
 				continue;
 			}
@@ -1989,7 +2004,7 @@ fn void frame() => @pool()
 		// Navigate after drawing: do not mutate the entry array during iteration.
 		if (go_up) { go_parent(); }
 		else if (multi_enter && launch_marked()) {}
-		else if (enter >= 0 && any_busy && busy_kind[enter]) { ui::toast(string::tformat("%s: wait until it is done", busy_verb(busy_kind[enter])), ui::YELLOW); }
+		else if (enter >= 0 && any_busy && busy_kind[enter]) { ui::toast(string::tformat("%s: wait until it is done", busy_verb(busy_kind[enter], busy_queued[enter])), ui::YELLOW); }
 		else if (enter >= 0)
 		{
 			String name = txt::view(&entries[enter].name);

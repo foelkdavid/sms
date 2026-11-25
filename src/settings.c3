@@ -12,6 +12,7 @@ float rules_scroll;
 float targets_scroll;
 const float RULE_ROW = 44;
 const int ID_TERMINAL = 90;
+const int ID_OPERATIONS = 91;
 ui::Shortcut[*] shortcuts = {
 	{ "NAVIGATION", "", true },
 	{ "Up / Down", "Move selection (hold to repeat)", false },
@@ -131,6 +132,13 @@ fn void draw()
 		if (ui::checkbox(x + 4, area.y + 88, "Show Downloads in Sidebar", &dl)) places::set_downloads(dl);
 		ui::label(x + 4, area.y + 136, "TERMINAL");
 		if (ui::input(ID_TERMINAL, { x + 4, area.y + 156, width - 8, 36 }, &prefs::terminal, "foot", null, ui::I_TERMINAL)) prefs::dirty = true;
+		ui::label(x + 4, area.y + 212, "SEVERAL FILE OPERATIONS");
+		int mode = prefs::operations;
+		if (ui::dropdown(ID_OPERATIONS, { x + 4, area.y + 232, width - 8, 36 }, { "Auto: copies on the same drive one after another, the rest at once", "One after another", "All at once" }, &mode))
+		{
+			prefs::operations = mode;
+			prefs::dirty = true;
+		}
 	}
 	else
 	{

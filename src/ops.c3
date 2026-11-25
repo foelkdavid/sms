@@ -73,7 +73,6 @@ fn void Names.free(&self)
 	*self = {};
 }
 
-fileop::Job job;
 fileop::Job counter;           // COUNT for the permanent-delete question (independent of `job`)
 fileop::Progress counted;
 fileop::Job sizer;             // background COUNT of the trash for the sidebar badge
@@ -84,7 +83,6 @@ char[96] count_text;
 int count_shown = -1;
 ulong count_bytes_shown;
 fileop::State count_state_shown;
-fileop::Progress cur;          // snapshot of this frame
 Names clip;
 bool clip_cut;
 bool clip_archive;             // clip.dir is an archive file; Ctrl+V extracts the names from folder clip_inner of it
@@ -94,12 +92,6 @@ char[4096] ext_inner;
 bool ext_smart;
 char[4096] open_after;         // a temporary copy to open with its opener once extracted
 Names pending;                 // waiting for the delete confirmation
-// The running request, kept for "Retry as administrator" after a permission error.
-Names req;
-fileop::Kind req_kind;
-char[4096] req_dst;
-bool req_fallback;
-bool req_elevated;
 bool admin_open;
 bool admin_for_open;           // the dialog asks for a program as sudo (not a retry of a file operation)
 // The program to run as sudo (Shift+right-click menus): command split like an opener, paths appended, run in sudo_cwd.
@@ -126,30 +118,121 @@ bool pending_fallback;         // TRASH with permanent fallback for items on oth
 int pending_untrashable;
 bool apply_all;
 bool refresh;                  // the folder listing may have changed
-// Running job (for texts and the finish toast).
-fileop::Kind job_kind;
-int job_items;
-bool job_clears_clip;
-char[256] job_target;
-double job_started;
-char[160] title;
-char[160] detail;
-double sample_time;            // last detail-text refresh
-double last_poll;
-double active_time;            // seconds spent transferring (no scanning, no conflict dialog)
-float shown_frac;              // drawn bar fill, eased toward the real fraction
-ulong sample_bytes;            // bytes_done / active_time at the last detail refresh
-double sample_active;
-double recent_speed;           // bytes / s over the last few seconds (smoothed), 0 = none yet
-double shown_eta;              // seconds left as displayed: counts down, nudged toward the estimate (-1 = none yet)
-double eta_active;             // active_time when shown_eta was last updated
-bool show_items;               // the progress panel lists each item (toggled by a click on it; kept for the session)
-float items_scroll;
-bool items_follow;             // keep the active item in view until the user scrolls
-fileop::ItemProgress[16] item_rows; // visible rows only (one item_status call per frame)
 
-fn bool busy() => job.busy();
-fn bool modal() => confirm_open || admin_open || new_open || ui::close_requested || (job.busy() && cur.state == CONFLICT);
+// Operations: up to MAX_OPS at once, running or queued. Ctrl+K → General decides when a new one waits: Auto (a
+// transfer that copies data waits for a running one on the same drive; moves on one drive, trash and delete start
+// at once), One after another, or All at once.
+const int MAX_OPS = 8;
+const float QUEUED_H = 46;     // panel of a waiting operation
+const float PANEL_GAP = 6;
+enum OpState { FREE, QUEUED, RUNNING }
+
+struct Op
+{
+	OpState state;
+	ulong seq;                 // order of the requests (the queue is first come, first served)
+	fileop::Job job;
+	fileop::Progress cur;      // snapshot of this frame
+	// The request: what a queued operation starts, and what "Retry as administrator" repeats.
+	Names req;
+	fileop::Kind kind;
+	char[4096] dst;
+	bool fallback;
+	bool elevated;
+	char[4096] inner;          // EXTRACT: folder inside the archive
+	bool smart;
+	char[4096] open_after;     // EXTRACT: a temporary copy to open with its opener once extracted
+	ulong dev_a;               // the drives it reads and writes (Auto: one data transfer per drive at a time)
+	ulong dev_b;
+	bool heavy;                // copies data: COPY, EXTRACT, MOVE across drives
+	bool clears_clip;
+	int items;
+	int dropped_seen;          // Progress.dropped last frame (items left out: the list's marks change)
+	char[256] target;
+	double started;
+	char[160] title;
+	char[160] detail;
+	double sample_time;        // last detail-text refresh
+	double last_poll;
+	double active_time;        // seconds spent transferring (no scanning, no conflict dialog)
+	float shown_frac;          // drawn bar fill, eased toward the real fraction
+	ulong sample_bytes;        // bytes_done / active_time at the last detail refresh
+	double sample_active;
+	double recent_speed;       // bytes / s over the last few seconds (smoothed), 0 = none yet
+	double shown_eta;          // seconds left as displayed: counts down, nudged toward the estimate (-1 = none yet)
+	double eta_active;         // active_time when shown_eta was last updated
+	bool show_items;           // its panel lists each item (click on the panel)
+	float items_scroll;
+	bool items_follow;         // keep the active item in view until the user scrolls
+}
+Op[MAX_OPS] slots;
+ulong op_seq;
+bool show_items_default;       // the last expand / collapse choice, used for new operations (this session)
+fileop::ItemProgress[16] item_rows; // visible rows only (one item_status call per panel and frame)
+bool marks_dirty;              // running or queued items changed: the list recomputes its busy marks
+fileop::Busy running;          // running operations of every sms window (bmu registry, inotify); open() in main
+// "Retry as administrator": a copy of the failed request (its slot may be reused meanwhile).
+Names retry;
+fileop::Kind retry_kind;
+char[4096] retry_dst;
+bool retry_clears;
+ulong conflict_seq;            // the operation the conflict dialog shows ("for all" resets when it changes)
+
+extern fn CInt c_stat(ZString path, libc::Stat* st) @cname("stat");
+
+<* Any operation running or waiting. *>
+fn bool busy()
+{
+	foreach (&o : slots) if (o.state != FREE) return true;
+	return false;
+}
+
+<* Room for another operation. *>
+fn bool can_start()
+{
+	foreach (&o : slots) if (o.state == FREE) return true;
+	return false;
+}
+
+fn Op* conflict_op()
+{
+	Op* c;
+	foreach (&o : slots) if (o.state == RUNNING && o.cur.state == CONFLICT && (!c || o.seq < c.seq)) c = o;
+	return c;
+}
+
+fn bool modal() => confirm_open || admin_open || new_open || ui::close_requested || conflict_op() != null;
+
+fn bool take_marks_dirty()
+{
+	bool d = marks_dirty;
+	marks_dirty = false;
+	return d;
+}
+
+<* Progress of `item` of this process's running job `job_id` (a BusyHit): false when it is not running here. *>
+fn bool item_status(ulong job_id, int item, fileop::ItemProgress* out)
+{
+	foreach (&o : slots) if (o.state == RUNNING && o.job.id() == job_id) return o.job.item_status(item, out[:1]) == 1;
+	return false;
+}
+
+<* `dir`/`name` waits in a queued operation of this window: its kind + 1, else 0. *>
+fn char queued_kind(String dir, String name)
+{
+	foreach (&o : slots)
+	{
+		if (o.state != QUEUED || txt::view(&o.req.dir) != dir) continue;
+		for (int i = 0; i < o.req.count; i++) if (o.req.at(i) == name) return (char)((int)o.kind + 1);
+	}
+	return 0;
+}
+
+fn bool queued_in(String dir)
+{
+	foreach (&o : slots) if (o.state == QUEUED && txt::view(&o.req.dir) == dir) return true;
+	return false;
+}
 fn bool has_clip() => clip.count > 0;
 <* Entry names cut to the clipboard are drawn dimmed while their folder is shown. *>
 fn bool is_cut(String dir) => clip_cut && clip.count > 0 && txt::view(&clip.dir) == dir;
@@ -202,10 +285,11 @@ fn bool take_refresh()
 
 fn void close()
 {
-	job.close();
+	foreach (&o : slots) { o.job.close(); o.req.free(); o.state = FREE; }
+	running.close();
 	counter.close();
 	ui::wipe(&admin_pw);
-	req.free();
+	retry.free();
 	sizer.close();
 	clip.free();
 	pending.free();
@@ -232,54 +316,137 @@ fn void time_text(char[] out, double s) => @pool()
 	txt::set(out, string::tformat("%d h %d min", t / 3600, (t % 3600) / 60));
 }
 
-fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir = "", bool fallback = false, char[] password = {}) => @pool()
+fn ulong dev_of(String path) => @pool()
 {
-	if (job.busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return false; }
-	bool elevated = password.ptr != null;
-	bool ok;
-	if (kind == EXTRACT) { ok = job.extract(src_dir, txt::view(&ext_inner), names, dst_dir, ext_smart); }
-	else if (elevated) { ok = job.start_elevated(kind, src_dir, names, dst_dir, password, fallback); }
-	else { ok = job.start(kind, src_dir, names, dst_dir, fallback); }
-	if (!ok) { ui::toast("Could not start the file operation", ui::RED); return false; }
-	// Remember the request for a retry as administrator (names may point into the listing).
-	if (!elevated) req.set(src_dir, names);
-	req_kind = kind;
-	txt::set(&req_dst, dst_dir);
-	req_fallback = fallback;
-	req_elevated = elevated;
-	job_kind = kind;
-	job_items = (int)names.len;
-	job_clears_clip = false;
-	txt::set(&job_target, dst_dir == "/" ? "/" : txt::basename(dst_dir));
-	job_started = ui::now;
-	sample_time = ui::now;
-	last_poll = ui::now;
-	active_time = 0;
-	shown_frac = 0;
-	sample_bytes = 0;
-	sample_active = 0;
-	recent_speed = 0;
-	shown_eta = -1;
-	items_scroll = 0;
-	items_follow = true;
-	apply_all = false;
-	if (kind != EXTRACT) open_after[0] = 0;
-	String what = names.len == 1 ? string::tformat("\"%s\"", names[0]) : string::tformat("%d items", names.len);
-	if (kind == EXTRACT && !names.len) { what = string::tformat("\"%s\"", txt::basename(src_dir)); job_items = 1; }
-	switch (kind)
+	libc::Stat st;
+	return c_stat(path.zstr_tcopy(), &st) == 0 ? (ulong)st.st_dev : 0;
+}
+
+<* Refuse items that a running or waiting operation (this or another sms window) already works on. *>
+fn bool in_use(String dir, String[] names) => @pool()
+{
+	String hit = "";
+	if (running.has_dir(dir)) foreach (n : names) if (running.find(dir, n).found) { hit = n; break; }
+	foreach (&o : slots)
 	{
-		case COPY: txt::set(&title, string::tformat("Copying %s to %s", what, txt::view(&job_target)));
-		case MOVE: txt::set(&title, string::tformat("Moving %s to %s", what, txt::view(&job_target)));
-		case TRASH: txt::set(&title, string::tformat("Moving %s to the trash", what));
-		case DELETE: txt::set(&title, string::tformat("Deleting %s", what));
-		case COUNT: txt::set(&title, string::tformat("Counting %s", what));
-		case RESTORE: txt::set(&title, string::tformat("Restoring %s", what));
-		case EXTRACT: txt::set(&title, string::tformat(open_after[0] ? "Extracting %s to open it" : "Extracting %s to %s", what, txt::view(&job_target)));
+		if (hit.len || o.state == FREE || txt::view(&o.req.dir) != dir || (long)o.req.count * (long)names.len > 4_000_000) continue;
+		for (int i = 0; i < o.req.count && !hit.len; i++) foreach (n : names) if (o.req.at(i) == n) { hit = n; break; }
 	}
-	if (elevated) txt::append(&title, " as sudo");
-	txt::set(&detail, "Preparing…");
-	job.status(&cur);
+	if (!hit.len) return false;
+	ui::toast(string::tformat("\"%s\" is already part of a file operation", hit), ui::RED);
 	return true;
+}
+
+<*
+ Start an operation, or queue it (see must_wait). Returns its slot (null: refused, with a toast). EXTRACT takes
+ ext_inner / ext_smart / open_after as set by extract(). Elevated operations never wait (the password is used now).
+*>
+fn Op* begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir = "", bool fallback = false, char[] password = {}) => @pool()
+{
+	Op* o;
+	foreach (&slot : slots) if (slot.state == FREE) { o = slot; break; }
+	if (!o) { ui::toast(string::tformat("At most %d file operations at once: wait for one to finish", MAX_OPS), ui::RED); return null; }
+	if (kind != EXTRACT && in_use(src_dir, names)) return null;
+	if (!o.req.set(src_dir, names)) { ui::toast("Too many items", ui::RED); return null; }
+	o.kind = kind;
+	txt::set(&o.dst, dst_dir);
+	o.fallback = fallback;
+	o.elevated = password.ptr != null;
+	txt::set(&o.inner, kind == EXTRACT ? txt::view(&ext_inner) : "");
+	o.smart = kind == EXTRACT && ext_smart;
+	txt::set(&o.open_after, kind == EXTRACT ? txt::view(&open_after) : "");
+	o.clears_clip = false;
+	o.items = kind == EXTRACT && !names.len ? 1 : (int)names.len;
+	o.dropped_seen = 0;
+	txt::set(&o.target, dst_dir == "/" ? "/" : txt::basename(dst_dir));
+	o.show_items = show_items_default;
+	o.seq = ++op_seq;
+	o.dev_a = dev_of(kind == EXTRACT ? txt::dirname(src_dir) : src_dir);
+	o.dev_b = dst_dir.len ? dev_of(dst_dir) : o.dev_a;
+	o.heavy = kind == COPY || kind == EXTRACT || (kind == MOVE && o.dev_a != o.dev_b);
+	set_title(o, src_dir);
+	if (!o.elevated && must_wait(o))
+	{
+		o.state = QUEUED;
+		marks_dirty = true;
+		return o;
+	}
+	return start_op(o, password) ? o : null;
+}
+
+fn void set_title(Op* o, String src_dir) => @pool()
+{
+	String what = o.req.count == 1 ? string::tformat("\"%s\"", o.req.at(0)) : string::tformat("%d items", o.req.count);
+	if (o.kind == EXTRACT && !o.req.count) what = string::tformat("\"%s\"", txt::basename(src_dir));
+	String target = txt::view(&o.target);
+	switch (o.kind)
+	{
+		case COPY: txt::set(&o.title, string::tformat("Copying %s to %s", what, target));
+		case MOVE: txt::set(&o.title, string::tformat("Moving %s to %s", what, target));
+		case TRASH: txt::set(&o.title, string::tformat("Moving %s to the trash", what));
+		case DELETE: txt::set(&o.title, string::tformat("Deleting %s", what));
+		case COUNT: txt::set(&o.title, string::tformat("Counting %s", what));
+		case RESTORE: txt::set(&o.title, string::tformat("Restoring %s", what));
+		case EXTRACT: txt::set(&o.title, string::tformat(o.open_after[0] ? "Extracting %s to open it" : "Extracting %s to %s", what, target));
+	}
+	if (o.elevated) txt::append(&o.title, " as sudo");
+}
+
+<* Does `o` have to wait for an earlier operation (the setting; Auto: a data transfer sharing a drive)? *>
+fn bool must_wait(Op* o)
+{
+	foreach (&p : slots)
+	{
+		if (p == o || p.state == FREE || (p.state == QUEUED && p.seq > o.seq)) continue;
+		switch (prefs::operations)
+		{
+			case prefs::OPS_QUEUE: return true;
+			case prefs::OPS_PARALLEL: break;
+			default:
+				bool shared = o.dev_a == p.dev_a || o.dev_a == p.dev_b || o.dev_b == p.dev_a || o.dev_b == p.dev_b;
+				if (o.heavy && p.heavy && shared) return true;
+		}
+	}
+	return false;
+}
+
+fn bool start_op(Op* o, char[] password = {}) => @pool()
+{
+	String src = txt::view(&o.req.dir);
+	String[] names = o.req.tview();
+	bool ok;
+	if (o.kind == EXTRACT) { ok = o.job.extract(src, txt::view(&o.inner), names, txt::view(&o.dst), o.smart); }
+	else if (o.elevated) { ok = o.job.start_elevated(o.kind, src, names, txt::view(&o.dst), password, o.fallback); }
+	else { ok = o.job.start(o.kind, src, names, txt::view(&o.dst), o.fallback); }
+	marks_dirty = true;
+	if (!ok) { ui::toast("Could not start the file operation", ui::RED); o.state = FREE; return false; }
+	o.state = RUNNING;
+	o.started = ui::now;
+	o.sample_time = ui::now;
+	o.last_poll = ui::now;
+	o.active_time = 0;
+	o.shown_frac = 0;
+	o.sample_bytes = 0;
+	o.sample_active = 0;
+	o.recent_speed = 0;
+	o.shown_eta = -1;
+	o.items_scroll = 0;
+	o.items_follow = true;
+	txt::set(&o.detail, "Preparing…");
+	o.job.status(&o.cur);
+	return true;
+}
+
+<* Start what may start now, oldest first. *>
+fn void start_queued()
+{
+	while (true)
+	{
+		Op* next;
+		foreach (&o : slots) if (o.state == QUEUED && (!next || o.seq < next.seq)) next = o;
+		if (!next || must_wait(next)) return;   // first come, first served
+		start_op(next);
+	}
 }
 
 <* Move trashed items (names in the trash's files/ folder) back to where they were deleted from. *>
@@ -295,11 +462,11 @@ fn void restore(String trash_files, String[] names)
 *>
 fn void extract(String archive_path, String inner, String[] names, String dst, bool smart, String open_path = "")
 {
-	if (job.busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return; }
 	txt::set(&ext_inner, inner);
 	ext_smart = smart;
 	txt::set(&open_after, open_path);
-	if (!begin(EXTRACT, archive_path, names, dst)) open_after[0] = 0;
+	begin(EXTRACT, archive_path, names, dst);
+	open_after[0] = 0;
 }
 
 // The system clipboard carries copied files between sms windows and other file managers
@@ -423,7 +590,7 @@ fn void paste_system(String list, bool cut, String dst) => @pool()
 	char[4096] real;
 	sys::realpath(&real, from);
 	if (cut && txt::view(&real) == dst) return; // moving into the same folder changes nothing
-	if (begin(cut ? MOVE : COPY, txt::view(&real), names[:n], dst) && cut)
+	if (begin(cut ? MOVE : COPY, txt::view(&real), names[:n], dst) != null && cut)
 	{
 		ui::clipboard_set_data({ "text/plain;charset=utf-8" }, { "" });   // a cut is pasted once
 		clip.free();   // this "" is ours now: no older internal clip may count as current
@@ -436,7 +603,8 @@ fn void paste_own(String dst) => @pool()
 {
 	if (clip_archive) { extract(txt::view(&clip.dir), txt::view(&clip_inner), clip.tview(), dst, false); return; }
 	if (clip_cut && txt::view(&clip.dir) == dst) return; // moving into the same folder changes nothing
-	if (begin(clip_cut ? MOVE : COPY, txt::view(&clip.dir), clip.tview(), dst)) job_clears_clip = clip_cut;
+	Op* o = begin(clip_cut ? MOVE : COPY, txt::view(&clip.dir), clip.tview(), dst);
+	if (o) o.clears_clip = clip_cut;
 }
 
 <* Drag & drop: move (or copy with Ctrl) names from src_dir into dst. *>
@@ -450,7 +618,8 @@ fn void transfer(String src_dir, String[] names, String dst, bool copy)
 fn void remove(String dir, String[] names, bool permanent) => @pool()
 {
 	if (!names.len) return;
-	if (job.busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return; }
+	if (!can_start()) { ui::toast(string::tformat("At most %d file operations at once: wait for one to finish", MAX_OPS), ui::RED); return; }
+	if (in_use(dir, names)) return;
 	if (!permanent && prefs::trash)
 	{
 		int untrashable;
@@ -478,7 +647,6 @@ fn void remove(String dir, String[] names, bool permanent) => @pool()
 <* Empty the trash: everything in `<trash>/files` (one listing, on this explicit action), after the confirmation. *>
 fn void empty_trash(String files_dir) => @pool()
 {
-	if (job.busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return; }
 	sys::Entry[] found = mem::talloc_array(sys::Entry, fileop::MAX_ITEMS);
 	int n = sys::list_dir(files_dir, found, true);
 	if (n <= 0) { ui::toast("The trash is already empty"); return; }
@@ -489,44 +657,53 @@ fn void empty_trash(String files_dir) => @pool()
 	pending_empty = confirm_open;
 }
 
-<* Once per frame, before input: progress snapshot, finish handling, close guard. *>
+<* Once per frame, before input: progress snapshots, finish handling, the queue, close guard. *>
 fn void poll() => @pool()
 {
 	poll_sudo();
-	fileop::Progress done;
-	if (job.finished(&done))
+	if (running.poll()) marks_dirty = true;
+	foreach (&o : slots)
 	{
-		cur = done;
-		refresh = !(job_kind == EXTRACT && open_after[0]); // a temporary copy changes no shown folder
-		size_dirty = true;
-		finished(&done);
-	}
-	else if (job.busy())
-	{
-		bool was_removing = cur.remove_total > 0;
-		job.status(&cur);
-		if (cur.remove_total > 0 && !was_removing) { shown_frac = 0; sample_time = 0; } // new step: bar restarts, text now
-		double dt = math::min(ui::now - last_poll, 0.25);
-		if (cur.state != SCANNING && cur.state != CONFLICT) active_time += dt;
+		if (o.state != RUNNING) continue;
+		fileop::Progress done;
+		if (o.job.finished(&done))
+		{
+			o.cur = done;
+			o.state = FREE;
+			marks_dirty = true;
+			if (!(o.kind == EXTRACT && o.open_after[0])) refresh = true; // a temporary copy changes no shown folder
+			size_dirty = true;
+			finished(o, &done);
+			continue;
+		}
+		bool was_removing = o.cur.remove_total > 0;
+		o.job.status(&o.cur);
+		if (o.cur.dropped != o.dropped_seen) { o.dropped_seen = o.cur.dropped; marks_dirty = true; } // left-out items are free again
+		if (o.cur.remove_total > 0 && !was_removing) { o.shown_frac = 0; o.sample_time = 0; } // new step: bar restarts, text now
+		double dt = math::min(ui::now - o.last_poll, 0.25);
+		if (o.cur.state != SCANNING && o.cur.state != CONFLICT) o.active_time += dt;
 		// Ease the bar toward the real fraction (~0.3 s), never backwards: flushes arrive in steps.
-		float target = math::max(shown_frac, progress_frac());
-		shown_frac += (target - shown_frac) * (float)math::min(1.0, dt * 8);
-		if (ui::now - sample_time >= 0.5) update_detail();
+		float target = math::max(o.shown_frac, progress_frac(o));
+		o.shown_frac += (target - o.shown_frac) * (float)math::min(1.0, dt * 8);
+		if (ui::now - o.sample_time >= 0.5) update_detail(o);
+		o.last_poll = ui::now;
 	}
-	last_poll = ui::now;
-	ui::hold_close = job.busy();
-	if (ui::close_requested && !job.busy()) ui::quit = true;
+	start_queued();
+	ui::hold_close = busy();
+	if (ui::close_requested && !busy()) ui::quit = true;
 }
 
-fn void finished(fileop::Progress* p) => @pool()
+fn void finished(Op* o, fileop::Progress* p) => @pool()
 {
-	String what = string::tformat("%d %s", job_items, plural(job_items, "item", "items"));
+	int done_items = o.items - p.dropped;
+	String what = string::tformat("%d %s", done_items, plural(done_items, "item", "items"));
 	String skipped = p.skipped ? string::tformat(" (%d skipped)", p.skipped) : "";
+	if (p.dropped) skipped = string::tformat("%s (%d left out)", skipped, p.dropped);
 	switch (p.state)
 	{
 		case DONE:
-			if (job_clears_clip) { clip.count = 0; clip_cut = false; }
-			switch (job_kind)
+			if (o.clears_clip) { clip.count = 0; clip_cut = false; }
+			switch (o.kind)
 			{
 				case COPY: ui::toast(string::tformat("Copied %s%s", what, skipped), ui::GREEN);
 				case MOVE: ui::toast(string::tformat("Moved %s%s", what, skipped), ui::GREEN);
@@ -534,22 +711,27 @@ fn void finished(fileop::Progress* p) => @pool()
 				case DELETE: ui::toast(string::tformat("Deleted %s", what), ui::GREEN);
 				case RESTORE: ui::toast(string::tformat("Restored %s%s", what, skipped), ui::GREEN);
 				case EXTRACT:
-					if (open_after[0])
+					if (o.open_after[0])
 					{
-						if (openers::launch(txt::view(&open_after))) ui::toast("Opened a temporary copy (deleted when sms closes)");
+						if (openers::launch(txt::view(&o.open_after))) ui::toast("Opened a temporary copy (deleted when sms closes)");
 					}
 					else { ui::toast(string::tformat("Extracted %s%s", what, skipped), ui::GREEN); }
 				case COUNT: break;
 			}
 		case CANCELLED:
-			ui::toast(job_kind == COPY || job_kind == MOVE || job_kind == EXTRACT ? "Cancelled: nothing was changed" : "Cancelled", ui::YELLOW);
+			ui::toast(o.kind == COPY || o.kind == MOVE || o.kind == EXTRACT ? "Cancelled: nothing was changed" : "Cancelled", ui::YELLOW);
 		default:
 			// Permission denied: offer the same operation as administrator (not for restore / sizing).
 			bool denied = p.err == 13 || p.err == 1;
-			bool wrong_pw = req_elevated && txt::view(&p.error) == "Wrong password";
-			if ((denied && !req_elevated && job_kind != RESTORE && job_kind != COUNT && job_kind != EXTRACT) || wrong_pw)
+			bool wrong_pw = o.elevated && txt::view(&p.error) == "Wrong password";
+			if (((denied && !o.elevated && o.kind != RESTORE && o.kind != COUNT && o.kind != EXTRACT) || wrong_pw) && !admin_open)
 			{
-				admin_delete = req_kind == TRASH || req_kind == DELETE;
+				// Keep a copy of the request: this slot may be reused before the password is typed.
+				retry.set(txt::view(&o.req.dir), o.req.tview());
+				retry_kind = o.kind;
+				txt::set(&retry_dst, txt::view(&o.dst));
+				retry_clears = o.clears_clip;
+				admin_delete = o.kind == TRASH || o.kind == DELETE;
 				admin_for_open = false;
 				if (!wrong_pw) { txt::set(&admin_error, txt::empty(&p.error) ? "Permission denied" : txt::view(&p.error)); }
 				else { txt::set(&admin_error, "Wrong password. Try again."); }
@@ -636,10 +818,9 @@ fn void poll_sudo()
 fn void retry_as_admin() => @pool()
 {
 	// Trash as root would fill root's trash: a denied trash becomes a permanent delete (the dialog says so).
-	fileop::Kind kind = req_kind == TRASH ? DELETE : req_kind;
-	bool clears = job_clears_clip;
-	begin(kind, txt::view(&req.dir), req.tview(), txt::view(&req_dst), false, &admin_pw);
-	job_clears_clip = clears;
+	fileop::Kind kind = retry_kind == TRASH ? DELETE : retry_kind;
+	Op* o = begin(kind, txt::view(&retry.dir), retry.tview(), txt::view(&retry_dst), false, &admin_pw);
+	if (o) o.clears_clip = retry_clears;
 	ui::wipe(&admin_pw);
 }
 
@@ -697,163 +878,230 @@ fn void update_count() => @pool()
 }
 
 <* Real progress 0..1 of the running job: bytes when known, else files. *>
-fn float progress_frac()
+fn float progress_frac(Op* o)
 {
-	if (cur.remove_total > 0) return math::min(1.0f, (float)cur.removed / (float)cur.remove_total);
-	if (cur.state == FINISHING) return 1;
-	if (cur.bytes_total > 0) return math::min(1.0f, (float)cur.bytes_done / (float)cur.bytes_total);
-	if (cur.files_total > 0) return math::min(1.0f, (float)cur.files_done / (float)cur.files_total);
+	if (o.cur.remove_total > 0) return math::min(1.0f, (float)o.cur.removed / (float)o.cur.remove_total);
+	if (o.cur.state == FINISHING) return 1;
+	if (o.cur.bytes_total > 0) return math::min(1.0f, (float)o.cur.bytes_done / (float)o.cur.bytes_total);
+	if (o.cur.files_total > 0) return math::min(1.0f, (float)o.cur.files_done / (float)o.cur.files_total);
 	return 0;
 }
 
 <* Speed and ETA mostly from the whole run so far (average), with a little recent speed blended in: calm, yet it
    follows a lasting change (small files, then big ones). *>
-fn void update_detail() => @pool()
+fn void update_detail(Op* o) => @pool()
 {
-	sample_time = ui::now;
-	double da = active_time - sample_active;
-	if (da > 0.2 && cur.bytes_done >= sample_bytes)
+	o.sample_time = ui::now;
+	double da = o.active_time - o.sample_active;
+	if (da > 0.2 && o.cur.bytes_done >= o.sample_bytes)
 	{
-		double now_speed = (double)(cur.bytes_done - sample_bytes) / da;
-		recent_speed = recent_speed <= 0 ? now_speed : recent_speed * 0.8 + now_speed * 0.2;
-		sample_bytes = cur.bytes_done;
-		sample_active = active_time;
+		double now_speed = (double)(o.cur.bytes_done - o.sample_bytes) / da;
+		o.recent_speed = o.recent_speed <= 0 ? now_speed : o.recent_speed * 0.8 + now_speed * 0.2;
+		o.sample_bytes = o.cur.bytes_done;
+		o.sample_active = o.active_time;
 	}
 	char[32] a, b, c, d;
-	switch (cur.state)
+	switch (o.cur.state)
 	{
 		case SCANNING:
 		case CONFLICT:
-			size_text(&a, cur.bytes_total);
-			txt::set(&detail, string::tformat("Preparing… %d files, %s", cur.files_total, txt::view(&a)));
+			size_text(&a, o.cur.bytes_total);
+			txt::set(&o.detail, string::tformat("Preparing… %d files, %s", o.cur.files_total, txt::view(&a)));
 		case FINISHING:
-			if (cur.remove_total > 0)
+			if (o.cur.remove_total > 0)
 			{
-				group_digits(&a, cur.removed);
-				group_digits(&b, cur.remove_total);
-				txt::set(&detail, string::tformat("Removing originals… %s of %s", txt::view(&a), txt::view(&b)));
+				group_digits(&a, o.cur.removed);
+				group_digits(&b, o.cur.remove_total);
+				txt::set(&o.detail, string::tformat("Removing originals… %s of %s", txt::view(&a), txt::view(&b)));
 				break;
 			}
-			txt::set(&detail, cur.can_cancel ? "Finishing…" : txt::view(&cur.current) == "Undoing" ? "Undoing changes…" : "Finishing…");
+			txt::set(&o.detail, o.cur.can_cancel ? "Finishing…" : txt::view(&o.cur.current) == "Undoing" ? "Undoing changes…" : "Finishing…");
 		default:
-			if (cur.bytes_total > 0)
+			if (o.cur.bytes_total > 0)
 			{
-				size_text(&a, cur.bytes_done);
-				size_text(&b, cur.bytes_total);
-				double f = (double)cur.bytes_done / (double)cur.bytes_total;
-				if (active_time < 1.5 || f < 0.005)
+				size_text(&a, o.cur.bytes_done);
+				size_text(&b, o.cur.bytes_total);
+				double f = (double)o.cur.bytes_done / (double)o.cur.bytes_total;
+				if (o.active_time < 1.5 || f < 0.005)
 				{
-					txt::set(&detail, string::tformat("%s of %s · estimating…", txt::view(&a), txt::view(&b)));
+					txt::set(&o.detail, string::tformat("%s of %s · estimating…", txt::view(&a), txt::view(&b)));
 				}
 				else
 				{
-					double avg = (double)cur.bytes_done / active_time;
-					double rate = recent_speed > 0 ? avg * 0.85 + recent_speed * 0.15 : avg;
+					double avg = (double)o.cur.bytes_done / o.active_time;
+					double rate = o.recent_speed > 0 ? avg * 0.85 + o.recent_speed * 0.15 : avg;
 					size_text(&c, (ulong)rate);
 					if (rate > 1)
 					{
 						// Count down by the time passed, then move a fifth of the way to the new estimate.
-						double eta = (double)(cur.bytes_total - cur.bytes_done) / rate;
-						shown_eta = shown_eta < 0 ? eta : math::max(0.0, shown_eta - (active_time - eta_active)) * 0.8 + eta * 0.2;
-						eta_active = active_time;
-						time_text(&d, shown_eta);
+						double eta = (double)(o.cur.bytes_total - o.cur.bytes_done) / rate;
+						o.shown_eta = o.shown_eta < 0 ? eta : math::max(0.0, o.shown_eta - (o.active_time - o.eta_active)) * 0.8 + eta * 0.2;
+						o.eta_active = o.active_time;
+						time_text(&d, o.shown_eta);
 					}
 					else { txt::set(&d, "—"); }
-					txt::set(&detail, string::tformat("%s of %s · %s/s · %s left", txt::view(&a), txt::view(&b), txt::view(&c), txt::view(&d)));
+					txt::set(&o.detail, string::tformat("%s of %s · %s/s · %s left", txt::view(&a), txt::view(&b), txt::view(&c), txt::view(&d)));
 				}
 			}
 			else
 			{
-				txt::set(&detail, string::tformat("%d of %d", cur.files_done, math::max(cur.files_total, cur.files_done)));
+				txt::set(&o.detail, string::tformat("%d of %d", o.cur.files_done, math::max(o.cur.files_total, o.cur.files_done)));
 			}
 	}
 }
 
-<* Height of the docked progress bar this frame (0 = hidden). Instant jobs never flash it. *>
-fn float panel_height() => job.busy() && (ui::now - job_started > 0.25 || cur.state == CONFLICT) ? PANEL_H + items_height() : 0;
+<* The operations with a panel this frame, oldest first (instant ones never flash a panel). *>
+fn int shown_ops(Op*[] out)
+{
+	int n;
+	foreach (&o : slots)
+	{
+		bool shown = o.state == QUEUED || (o.state == RUNNING && (ui::now - o.started > 0.25 || o.cur.state == CONFLICT));
+		if (!shown) continue;
+		int k = n++;
+		while (k > 0 && out[k - 1].seq > o.seq) { out[k] = out[k - 1]; k--; }
+		out[k] = o;
+	}
+	return n;
+}
+
+fn float op_height(Op* o, int shown) => o.state == QUEUED ? QUEUED_H : PANEL_H + items_height(o, shown);
+
+<* Height of the docked panels this frame (0 = none). *>
+fn float panel_height()
+{
+	Op*[MAX_OPS] list;
+	int n = shown_ops(&list);
+	float h;
+	for (int i = 0; i < n; i++) h += op_height(list[i], n) + (i ? PANEL_GAP : 0);
+	return h;
+}
 
 <* The panel can list its items: more than one, tracked by bmu (not archives, sizing or elevated jobs). *>
-fn bool has_items() => job.item_count() > 1;
+fn bool has_items(Op* o) => o.state == RUNNING && o.job.item_count() > 1;
 
-<* Height of the item rows under the bar (0 = collapsed): at most ITEM_ROWS_MAX rows and about a third of the window. *>
-fn float items_height()
+<* Height of the item rows under the bar (0 = collapsed): six rows (three with several panels), at most about a
+   third of the window. *>
+fn float items_height(Op* o, int shown)
 {
-	if (!show_items || !has_items()) return 0;
-	float rows = (float)math::min(job.item_count(), ITEM_ROWS_MAX);
+	if (!o.show_items || !has_items(o)) return 0;
+	float rows = (float)math::min(o.job.item_count(), shown > 1 ? 3 : ITEM_ROWS_MAX);
 	float room = math::max(ITEM_ROW * 2, ui::sh() * 0.35f - PANEL_H);
 	return math::min(rows * ITEM_ROW, room) + 8;
 }
 
-<* Docked progress bar (layer 0) below the file list. *>
+<* Docked panels (layer 0) below the file list: one per running or waiting operation, oldest on top. *>
 fn void draw_panel(Rect r)
 {
 	if (r.height <= 0) return;
+	Op*[MAX_OPS] list;
+	int n = shown_ops(&list);
+	float y = r.y;
+	for (int i = 0; i < n; i++)
+	{
+		float h = op_height(list[i], n);
+		Rect pr = { r.x, y, r.width, h };
+		if (list[i].state == QUEUED) { draw_queued(list[i], pr); }
+		else { draw_op(list[i], pr, n); }
+		y += h + PANEL_GAP;
+	}
+}
+
+<* A waiting operation: its title, why it waits, and ✕ to drop it from the queue. *>
+fn void draw_queued(Op* o, Rect r)
+{
+	ui::panel(r, ui::BG_HARD, 6);
+	ui::outline(r, ui::BG2, 6);
+	float x = r.x + 14;
+	ui::text(ui::I_CLOCK, x, r.y + 14, 16, ui::GRAY);
+	ui::text_fit(txt::view(&o.title), x + 28, r.y + 7, r.width - 100, 15, ui::FG4);
+	ui::text_fit(prefs::operations == prefs::OPS_QUEUE ? "Waiting: starts when the earlier operations are done" : "Waiting: starts when the transfer on the same drive is done", x + 28, r.y + 26, r.width - 100, 12, ui::GRAY);
+	if (ui::icon_button({ r.x + r.width - 44, r.y + 8, 32, 30 }, ui::I_TIMES, ui::FG4, "Remove from the queue"))
+	{
+		o.state = FREE;
+		marks_dirty = true;
+	}
+}
+
+<* A running operation: title, bar, speed / time left, its current item; a click lists each item. *>
+fn void draw_op(Op* o, Rect r, int shown)
+{
 	ui::panel(r, ui::BG_HARD, 6);
 	ui::outline(r, ui::BG2, 6);
 	float x = r.x + 14;
 	float w = r.width - 28;
-	String icon = job_kind == TRASH || job_kind == DELETE ? ui::I_TRASH : job_kind == MOVE ? ui::I_CUT : job_kind == RESTORE ? ui::I_UNDO : job_kind == EXTRACT ? ui::I_FILE_ARCHIVE : ui::I_COPY;
-	bool items = has_items();
+	fileop::Kind kind = o.kind;
+	String icon = kind == TRASH || kind == DELETE ? ui::I_TRASH : kind == MOVE ? ui::I_CUT : kind == RESTORE ? ui::I_UNDO : kind == EXTRACT ? ui::I_FILE_ARCHIVE : ui::I_COPY;
+	bool items = has_items(o);
 	Rect head = { r.x, r.y, r.width - 88, PANEL_H };
-	if (items && ui::hover(head)) { ui::outline(r, ui::BG3, 6); ui::tooltip(show_items ? "Hide the items" : "Show each item"); }
+	if (items && ui::hover(head)) { ui::outline(r, ui::BG3, 6); ui::tooltip(o.show_items ? "Hide the items" : "Show each item"); }
 	ui::text(icon, x, r.y + 12, 18, ui::AQUA);
-	ui::text_fit(txt::view(&title), x + 28, r.y + 13, w - (items ? 112 : 76), 16, ui::FG);
-	bool can = cur.can_cancel;
-	if (ui::icon_button({ r.x + r.width - 44, r.y + 8, 32, 30 }, ui::I_TIMES, can ? ui::FG4 : ui::BG3, can ? "Cancel (changes are rolled back)" : "Finishing…") && can) job.cancel();
-	if (items && (ui::icon_button({ r.x + r.width - 80, r.y + 8, 32, 30 }, show_items ? ui::I_UP : ui::I_DOWN, ui::FG4, show_items ? "Hide the items" : "Show each item") || ui::clicked(head)))
+	ui::text_fit(txt::view(&o.title), x + 28, r.y + 13, w - (items ? 112 : 76), 16, ui::FG);
+	bool can = o.cur.can_cancel;
+	if (ui::icon_button({ r.x + r.width - 44, r.y + 8, 32, 30 }, ui::I_TIMES, can ? ui::FG4 : ui::BG3, can ? "Cancel (changes are rolled back)" : "Finishing…") && can) o.job.cancel();
+	if (items && (ui::icon_button({ r.x + r.width - 80, r.y + 8, 32, 30 }, o.show_items ? ui::I_UP : ui::I_DOWN, ui::FG4, o.show_items ? "Hide the items" : "Show each item") || ui::clicked(head)))
 	{
-		show_items = !show_items;
-		items_follow = true;
+		o.show_items = !o.show_items;
+		show_items_default = o.show_items;
+		o.items_follow = true;
 	}
-	float frac = shown_frac;
 	Rect bar = { x, r.y + 42, w, 8 };
 	ui::panel(bar, ui::BG1, 4);
-	if (cur.state == SCANNING || cur.state == CONFLICT)
+	if (o.cur.state == SCANNING || o.cur.state == CONFLICT)
 	{
 		// Indeterminate: a sliding segment while counting.
-		float t = (float)(ui::now - job_started);
+		float t = (float)(ui::now - o.started);
 		float seg = w * 0.25f;
 		float pos = (w - seg) * (0.5f + 0.5f * math::sin(t * 2.5f));
 		ui::panel({ x + pos, bar.y, seg, bar.height }, ui::BG3, 4);
 	}
-	else if (frac > 0)
+	else if (o.shown_frac > 0)
 	{
-		ui::panel({ x, bar.y, math::max(8.0f, w * math::min(frac, 1.0f)), bar.height }, ui::AQUA, 4);
+		ui::panel({ x, bar.y, math::max(8.0f, w * math::min(o.shown_frac, 1.0f)), bar.height }, ui::AQUA, 4);
 	}
-	ui::text_fit(txt::view(&detail), x, r.y + 59, w * 0.6f, 14, ui::FG4);
-	String current = txt::view(&cur.current);
+	ui::text_fit(txt::view(&o.detail), x, r.y + 59, w * 0.6f, 14, ui::FG4);
+	String current = txt::view(&o.cur.current);
 	if (current != "Undoing") ui::text_tail(current, x + w * 0.6f + 8, r.y + 59, w * 0.4f - 8, 14, ui::GRAY);
-	float ih = items_height();
-	if (ih > 0) draw_items({ x, r.y + PANEL_H, w, ih - 8 });
+	float ih = items_height(o, shown);
+	if (ih > 0) draw_items(o, { x, r.y + PANEL_H, w, ih - 8 });
 }
 
-<* The expanded panel: one row per item (icon, name, own bar, size), virtualized, following the active item. *>
-fn void draw_items(Rect list) => @pool()
+<* Can this item still be left out (cancel_item)? COPY / MOVE until the commit; others only while it waits. *>
+fn bool can_drop(Op* o, fileop::ItemProgress* it)
 {
-	int n = job.item_count();
+	if (!o.cur.can_cancel || o.cur.state == FINISHING) return false;
+	if (it.state == SKIPPED || it.state == CANCELLED) return false;
+	return o.kind == COPY || o.kind == MOVE || it.state == WAITING;
+}
+
+<* The expanded panel: one row per item (icon, name, own bar, size, ✕), virtualized, following the active item. *>
+fn void draw_items(Op* o, Rect list) => @pool()
+{
+	int n = o.job.item_count();
 	ui::hline(list.x, list.y - 4, list.width, ui::BG2);
 	float content = (float)n * ITEM_ROW;
-	float wheel = ui::scroll_wheel(list, items_scroll, content);
-	if (wheel != items_scroll) { items_scroll = wheel; items_follow = false; }
-	if (items_follow && cur.item >= 0)
+	float wheel = ui::scroll_wheel(list, o.items_scroll, content);
+	if (wheel != o.items_scroll) { o.items_scroll = wheel; o.items_follow = false; }
+	if (o.items_follow && o.cur.item >= 0)
 	{
-		float top = (float)cur.item * ITEM_ROW;
-		if (top < items_scroll) items_scroll = top;
-		if (top + ITEM_ROW > items_scroll + list.height) items_scroll = top + ITEM_ROW - list.height;
-		items_scroll = math::max(0.0f, math::min(items_scroll, content - list.height));
+		float top = (float)o.cur.item * ITEM_ROW;
+		if (top < o.items_scroll) o.items_scroll = top;
+		if (top + ITEM_ROW > o.items_scroll + list.height) o.items_scroll = top + ITEM_ROW - list.height;
+		o.items_scroll = math::max(0.0f, math::min(o.items_scroll, content - list.height));
 	}
-	int first = (int)(items_scroll / ITEM_ROW);
+	int first = (int)(o.items_scroll / ITEM_ROW);
 	int want = math::min((int)(list.height / ITEM_ROW) + 2, (int)item_rows.len);
-	int got = job.item_status(first, item_rows[:want]);
+	int got = o.job.item_status(first, item_rows[:want]);
 	ui::begin_clip(list);
-	float nw = list.width * 0.52f;
+	float xw = 30;   // the ✕ at the right end
+	float nw = list.width * 0.46f;
 	float bx = list.x + 24 + nw + 12;
 	float bw = math::max(40.0f, list.width * 0.18f);
 	float sx = bx + bw + 12;
 	for (int k = 0; k < got; k++)
 	{
 		fileop::ItemProgress* it = &item_rows[k];
-		float y = list.y + (float)(first + k) * ITEM_ROW - items_scroll;
+		float y = list.y + (float)(first + k) * ITEM_ROW - o.items_scroll;
 		String icon = ui::I_CLOCK;
 		Color ic = ui::BG3;
 		switch (it.state)
@@ -861,11 +1109,12 @@ fn void draw_items(Rect list) => @pool()
 			case DONE: icon = ui::I_CHECK; ic = ui::GREEN;
 			case ACTIVE: icon = ui::I_RIGHT; ic = ui::AQUA;
 			case SKIPPED: icon = ui::I_FORWARD; ic = ui::YELLOW;
+			case CANCELLED: icon = ui::I_TIMES; ic = ui::GRAY;
 			default: break;
 		}
 		ui::text(icon, list.x + 2, y + 5, 14, ic);
-		ui::text_fit(txt::view(&it.name), list.x + 24, y + 5, nw, 14, it.state == WAITING ? ui::FG4 : ui::FG);
-		float f = it.bytes_total ? (float)it.bytes_done / (float)it.bytes_total : it.files_total ? (float)it.files_done / (float)it.files_total : it.state == DONE ? 1 : 0;
+		ui::text_fit(txt::view(&it.name), list.x + 24, y + 5, nw, 14, it.state == WAITING || it.state == CANCELLED ? ui::FG4 : ui::FG);
+		float f = it.bytes_total ? (float)it.bytes_done / (float)it.bytes_total : it.files_total ? (float)it.files_done / (float)it.files_total : 0;
 		if (it.state == DONE) f = 1;
 		if (it.state == ACTIVE || it.state == DONE)
 		{
@@ -875,6 +1124,7 @@ fn void draw_items(Rect list) => @pool()
 		char[32] a, b;
 		String size;
 		if (it.state == SKIPPED) { size = "skipped"; }
+		else if (it.state == CANCELLED) { size = "left out"; }
 		else if (it.bytes_total && it.state == ACTIVE)
 		{
 			size_text(&a, it.bytes_done);
@@ -883,45 +1133,61 @@ fn void draw_items(Rect list) => @pool()
 		}
 		else if (it.bytes_total) { size_text(&a, it.bytes_total); size = txt::view(&a); }
 		else if (it.files_total > 1) { size = string::tformat("%d items", it.files_total); }
-		ui::text_fit(size, sx, y + 6, list.x + list.width - sx - 8, 12, ui::GRAY);
+		ui::text_fit(size, sx, y + 6, list.x + list.width - sx - xw - 8, 12, ui::GRAY);
+		if (can_drop(o, it) && ui::icon_button({ list.x + list.width - xw - 6, y + 1, 24, 24 }, ui::I_TIMES, ui::GRAY, it.state == DONE ? "Leave this item out (undo it)" : "Leave this item out"))
+		{
+			if (!o.job.cancel_item(first + k)) ui::toast("Too late to leave it out", ui::YELLOW);
+		}
 	}
 	ui::end_clip();
-	ui::scrollbar(list, items_scroll, content);
+	ui::scrollbar(list, o.items_scroll, content);
 }
 
 <* Modal dialogs (layer 1): name conflict, delete confirmation, quit while busy. *>
 fn void draw_dialogs() => @pool()
 {
 	ui::layer = 1;
-	if (ui::close_requested && job.busy())
+	Op* conflict = conflict_op();
+	if (ui::close_requested && busy())
 	{
 		Rect box = ui::dialog(520, 210);
-		bool keep = ui::dialog_header(box, ui::I_WARN, "A file operation is running") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
-		bool undo = job_kind == COPY || job_kind == MOVE || job_kind == EXTRACT;
-		ui::text_fit(txt::view(&title), box.x + 20, box.y + 62, box.width - 40, 15, ui::FG);
-		ui::text_fit(undo ? "Quitting cancels it and rolls it back: nothing is lost." : "Quitting stops it; items already removed stay removed.", box.x + 20, box.y + 90, box.width - 40, 14, ui::FG4);
+		int n;
+		bool undo = true;
+		Op* one;
+		foreach (&o : slots)
+		{
+			if (o.state == FREE) continue;
+			n++;
+			one = o;
+			if (o.state == RUNNING && o.kind != COPY && o.kind != MOVE && o.kind != EXTRACT) undo = false;
+		}
+		bool keep = ui::dialog_header(box, ui::I_WARN, n == 1 ? "A file operation is running" : string::tformat("%d file operations are running or waiting", n)) || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
+		if (n == 1) ui::text_fit(txt::view(&one.title), box.x + 20, box.y + 62, box.width - 40, 15, ui::FG);
+		ui::text_fit(undo ? "Quitting cancels and rolls back: nothing is lost." : "Quitting stops them; items already removed stay removed.", box.x + 20, box.y + 90, box.width - 40, 14, ui::FG4);
 		if (ui::button({ box.x + 20, box.y + 140, 200, 40 }, "Keep running", PRIMARY)) keep = true;
 		if (ui::button({ box.x + box.width - 220, box.y + 140, 200, 40 }, "Cancel and quit", DANGER))
 		{
-			job.close();
+			foreach (&o : slots) { o.job.close(); o.state = FREE; }
 			ui::quit = true;
 		}
 		if (keep) ui::close_requested = false;
 	}
-	else if (job.busy() && cur.state == CONFLICT)
+	else if (conflict)
 	{
+		if (conflict.seq != conflict_seq) { conflict_seq = conflict.seq; apply_all = false; }
+		fileop::Progress* cur = &conflict.cur;
 		Rect box = ui::dialog(560, 230);
 		bool cancel = ui::dialog_header(box, ui::I_WARN, cur.conflict_dir ? "Folder already exists" : "File already exists") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
-		ui::text_fit(string::tformat("\"%s\" already exists in \"%s\".", txt::view(&cur.conflict), txt::view(&job_target)), box.x + 20, box.y + 62, box.width - 40, 15, ui::FG);
+		ui::text_fit(string::tformat("\"%s\" already exists in \"%s\".", txt::view(&cur.conflict), txt::view(&conflict.target)), box.x + 20, box.y + 62, box.width - 40, 15, ui::FG);
 		ui::text_fit("Replace deletes the existing one after the new one is complete.", box.x + 20, box.y + 88, box.width - 40, 13, ui::FG4);
 		ui::checkbox(box.x + 20, box.y + 118, "Do this for all conflicts", &apply_all);
 		float bw = (box.width - 40 - 24) / 4;
 		float by = box.y + 168;
 		if (ui::button({ box.x + 20, by, bw, 40 }, "Cancel")) cancel = true;
-		if (ui::button({ box.x + 28 + bw, by, bw, 40 }, "Skip")) job.answer(SKIP, apply_all);
-		if (ui::button({ box.x + 36 + bw * 2, by, bw, 40 }, "Keep both", PRIMARY)) job.answer(KEEP_BOTH, apply_all);
-		if (ui::button({ box.x + 44 + bw * 3, by, bw, 40 }, "Replace", DANGER)) job.answer(REPLACE, apply_all);
-		if (cancel) job.cancel();
+		if (ui::button({ box.x + 28 + bw, by, bw, 40 }, "Skip")) conflict.job.answer(SKIP, apply_all);
+		if (ui::button({ box.x + 36 + bw * 2, by, bw, 40 }, "Keep both", PRIMARY)) conflict.job.answer(KEEP_BOTH, apply_all);
+		if (ui::button({ box.x + 44 + bw * 3, by, bw, 40 }, "Replace", DANGER)) conflict.job.answer(REPLACE, apply_all);
+		if (cancel) conflict.job.cancel();
 	}
 	else if (admin_open)
 	{

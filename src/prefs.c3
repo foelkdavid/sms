@@ -17,6 +17,10 @@ bool sidebar = true;
 bool trash = true; // Del moves to the trash; false = permanent delete after confirmation
 bool archive_open = true; // double-click / Enter on a file inside an archive opens a temporary copy
 char[1024] terminal; // command for "Open terminal here" (split like an opener rule, run in the folder); empty = off
+const int OPS_AUTO = 0;     // a data transfer waits for a running one on the same drive; the rest starts at once
+const int OPS_QUEUE = 1;    // one operation after another
+const int OPS_PARALLEL = 2; // all at once
+int operations = OPS_AUTO;
 int content_percent = 100;
 int ui_percent; // 0 = monitor default until the user adjusts whole-UI zoom
 bool dirty;
@@ -46,6 +50,7 @@ fn void load() => @pool()
 		if (line.starts_with("sidebar=")) sidebar = line != "sidebar=0";
 		if (line.starts_with("trash=")) trash = line != "trash=0";
 		if (line.starts_with("archive_open=")) archive_open = line != "archive_open=0";
+		if (line.starts_with("operations=")) operations = line == "operations=queue" ? OPS_QUEUE : line == "operations=parallel" ? OPS_PARALLEL : OPS_AUTO;
 		if (line.starts_with("terminal=") && line.len - 9 < terminal.len) txt::set(&terminal, line[9..]);
 		if (line.starts_with("content_scale="))
 		{
@@ -73,6 +78,7 @@ fn bool save() => @pool()
 	txt::append(&data, trash ? "trash=1\n" : "trash=0\n");
 	txt::append(&data, archive_open ? "archive_open=1\n" : "archive_open=0\n");
 	txt::append(&data, string::tformat("terminal=%s\n", txt::view(&terminal)));
+	txt::append(&data, operations == OPS_QUEUE ? "operations=queue\n" : operations == OPS_PARALLEL ? "operations=parallel\n" : "operations=auto\n");
 	txt::append(&data, string::tformat("content_scale=%d\nui_scale=%d\n", content_percent, ui_percent));
 	String temp = txt::join(folder, "settings.tmp");
 	if (!sys::write_file(temp, txt::view(&data))) return false;
