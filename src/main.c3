@@ -1127,7 +1127,7 @@ fn void delete_items(bool valid, bool permanent)
 	if (!valid || deep) return;
 	bool forever = permanent || in_trash() || !prefs::trash;
 	ui::menu_sep();
-	if (ui::menu_item(forever ? "Delete permanently" : "Move to trash", ui::I_TRASH, permanent ? "Shift+Delete" : "Delete", !ops::busy()))
+	if (ui::menu_item(forever ? "Delete permanently" : "Move to trash", ui::I_TRASH, permanent ? "Shift+Delete" : "Delete", !ops::busy(), danger: true))
 	{
 		ops::remove(txt::view(&directory), menu_names(), forever);
 	}
@@ -1178,7 +1178,7 @@ fn void trash_menu()
 {
 	if (!ui::menu_begin(MENU_TRASH, 220)) return;
 	if (ui::menu_item("Open", ui::I_FOLDER_OPEN, "")) { ensure_trash(); ops::size_dirty = true; go(txt::view(&trash_files)); }
-	if (ui::menu_item("Empty trash", ui::I_TRASH, "", !ops::busy())) ops::empty_trash(txt::view(&trash_files));
+	if (ui::menu_item("Empty trash", ui::I_TRASH, "", !ops::busy(), danger: true)) ops::empty_trash(txt::view(&trash_files));
 	ui::menu_end();
 }
 
