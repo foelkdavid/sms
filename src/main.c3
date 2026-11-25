@@ -53,6 +53,7 @@ bool drop_trash; // The current drag is over the sidebar's Trash row; reset ever
 Rect path_field; // the path bar, for drawing its completions on top of everything
 const int MENU_FILE = 1;
 const int MENU_DIR = 2; // folder row or free list space: Open / Open terminal here
+const int MENU_TRASH = 3; // the sidebar's Trash row: Open / Empty trash
 int menu_entry = -1; // entry the file context menu is for
 char[4096] menu_dir; // folder the folder menu is for (a folder row, or the shown folder)
 bool menu_dir_row; // the folder menu came from a folder row (offers Open)
@@ -834,6 +835,7 @@ fn void sidebar_location(Rect row, String path, String name, String icon, bool t
 	float badge_w = badge.len ? ui::text_w(badge, 13) + 8 : 0;
 	ui::text_fit(name, row.x + 40, row.y + 12, row.width - 44 - badge_w, 16, ui::FG);
 	if (badge.len) ui::text(badge, row.x + row.width - badge_w, row.y + 14, 13, ui::GRAY);
+	if (trash && ui::right_clicked(row)) ui::menu_open(MENU_TRASH);
 	if (ui::clicked(row))
 	{
 		if (trash)
@@ -1100,6 +1102,7 @@ fn void file_menu() => @pool()
 	{
 		if (ui::menu_item("Open as sudo", ui::I_LOCK, "", valid)) ops::ask_open_as_sudo(path);
 		if (valid) openwith::menu_items(txt::view(&directory), menu_names(), true);
+		delete_items(valid, true);
 		ui::menu_end();
 		return;
 	}
@@ -1112,8 +1115,22 @@ fn void file_menu() => @pool()
 		if (ui::menu_item("Extract here", ui::I_FILE_ARCHIVE, "", idle)) ops::extract(path, "", {}, txt::view(&directory), true);
 		if (ui::menu_item("Extract to…", ui::I_FOLDER, "", idle)) ask_extract_to(path, "", {});
 	}
+	delete_items(valid, false);
 	new_items();
 	ui::menu_end();
+}
+
+<* "Move to trash" (Delete; permanent inside the trash or with trash off) or, in the Shift menu, "Delete permanently"
+   (Shift+Delete) for the right-clicked item or the selection it belongs to; both like the keys (confirmation). *>
+fn void delete_items(bool valid, bool permanent)
+{
+	if (!valid || deep) return;
+	bool forever = permanent || in_trash() || !prefs::trash;
+	ui::menu_sep();
+	if (ui::menu_item(forever ? "Delete permanently" : "Move to trash", ui::I_TRASH, permanent ? "Shift+Delete" : "Delete", !ops::busy()))
+	{
+		ops::remove(txt::view(&directory), menu_names(), forever);
+	}
 }
 
 <* "New folder" / "New file" (in the shown folder) at the end of a menu. *>
@@ -1144,13 +1161,24 @@ fn void dir_menu() => @pool()
 			else { ops::ask_sudo("Open terminal as sudo", path == "/" ? "/" : txt::basename(path), txt::view(&prefs::terminal), path, path, {}); }
 		}
 		openwith::menu_items(path, {}, true);
+		delete_items(menu_entry >= 0 && menu_entry < entry_count, true);
 		ui::menu_end();
 		return;
 	}
 	if (menu_dir_row && ui::menu_item("Open", ui::I_FOLDER_OPEN, "Enter")) go(path);
 	if (ui::menu_item(menu_dir_row ? "Open in terminal" : "Open terminal here", ui::I_TERMINAL, "")) openers::open_terminal(path);
 	openwith::menu_items(path, {});
+	delete_items(menu_entry >= 0 && menu_entry < entry_count, false);
 	new_items();
+	ui::menu_end();
+}
+
+<* Right-click on the sidebar's Trash: open it or empty it (asks first). *>
+fn void trash_menu()
+{
+	if (!ui::menu_begin(MENU_TRASH, 220)) return;
+	if (ui::menu_item("Open", ui::I_FOLDER_OPEN, "")) { ensure_trash(); ops::size_dirty = true; go(txt::view(&trash_files)); }
+	if (ui::menu_item("Empty trash", ui::I_TRASH, "", !ops::busy())) ops::empty_trash(txt::view(&trash_files));
 	ui::menu_end();
 }
 
@@ -1579,6 +1607,7 @@ fn void frame() => @pool()
 		ui::panel(tb, ui::BG_HARD, 6);
 		ui::text(ui::I_TRASH, tb.x + 12, tb.y + 10, 18, ui::RED);
 		ui::text("Trash", tb.x + 40, tb.y + 11, 16, ui::FG);
+		if (ui::button({ tb.x + tb.width - 304, tb.y + 4, 148, 32 }, "Empty trash", DANGER, ui::I_TRASH, entry_count > 0 && !ops::busy())) ops::empty_trash(txt::view(&trash_files));
 		if (ui::button({ tb.x + tb.width - 148, tb.y + 4, 140, 32 }, "Restore", PRIMARY, ui::I_UNDO, marked_count > 0 && !ops::busy()))
 		{
 			ops::restore(txt::view(&directory), marked_names());
@@ -1708,6 +1737,7 @@ fn void frame() => @pool()
 				if (!arc::active && ui::right_clicked(row))
 				{
 					txt::set(&menu_dir, txt::dirname(txt::view(&directory)));
+					menu_entry = -1; // ../ is never deleted from here
 					menu_dir_row = true;
 					menu_sudo = shift;
 					ui::menu_open(MENU_DIR);
@@ -1735,6 +1765,7 @@ fn void frame() => @pool()
 			{
 				if (!marked[vi]) select_only(vi);
 				txt::set(&menu_dir, txt::join(txt::view(&directory), txt::view(&entry.name)));
+				menu_entry = visible[vi];
 				menu_dir_row = true;
 				menu_sudo = shift;
 				ui::menu_open(MENU_DIR);
@@ -1809,6 +1840,7 @@ fn void frame() => @pool()
 		if (!row_menu && !arc::active && ui::right_clicked(list))
 		{
 			txt::set(&menu_dir, txt::view(&directory));
+			menu_entry = -1;
 			menu_dir_row = false;
 			menu_sudo = shift;
 			ui::menu_open(MENU_DIR);
@@ -1854,6 +1886,7 @@ fn void frame() => @pool()
 	if (!searching && ui::focused(ID_PATH)) complete::draw(path_field);
 	file_menu();
 	dir_menu();
+	trash_menu();
 	settings::draw();
 	ops::draw_dialogs();
 	if (picker::open)

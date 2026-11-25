@@ -119,6 +119,7 @@ char[4096] new_dir;
 char[160] new_error;
 char[256] created;             // the item just created, for the list to select after its reload ("" = none)
 const int ID_NEW_NAME = 51;
+bool pending_empty;             // the confirmation empties the whole trash
 bool pending_fallback;         // TRASH with permanent fallback for items on other drives
 int pending_untrashable;
 bool apply_all;
@@ -336,6 +337,7 @@ fn void remove(String dir, String[] names, bool permanent) => @pool()
 		pending_fallback = false;
 	}
 	if (!pending.set(dir, names)) { ui::toast("Too many items", ui::RED); return; }
+	pending_empty = false;
 	confirm_open = true;
 	// Count in the background: the dialog opens at once and fills in "N items, X GB" as the scan runs.
 	counter.close();
@@ -343,6 +345,20 @@ fn void remove(String dir, String[] names, bool permanent) => @pool()
 	counted = {};
 	count_shown = -1;
 	txt::set(&count_text, counting ? "Counting…" : "");
+}
+
+<* Empty the trash: everything in `<trash>/files` (one listing, on this explicit action), after the confirmation. *>
+fn void empty_trash(String files_dir) => @pool()
+{
+	if (job.busy()) { ui::toast("Wait for the current file operation to finish", ui::RED); return; }
+	sys::Entry[] found = mem::talloc_array(sys::Entry, fileop::MAX_ITEMS);
+	int n = sys::list_dir(files_dir, found, true);
+	if (n <= 0) { ui::toast("The trash is already empty"); return; }
+	if (n == fileop::MAX_ITEMS) ui::toast(string::tformat("The trash holds more than %d items: empty it again afterwards", fileop::MAX_ITEMS), ui::YELLOW);
+	String[] names = mem::talloc_array(String, (usz)n);
+	for (int i = 0; i < n; i++) names[i] = txt::view(&found[i].name);
+	remove(files_dir, names, true);
+	pending_empty = confirm_open;
 }
 
 <* Once per frame, before input: progress snapshot, finish handling, close guard. *>
@@ -683,16 +699,17 @@ fn void draw_dialogs() => @pool()
 	{
 		update_count();
 		Rect box = ui::dialog(520, 232);
-		bool cancel = ui::dialog_header(box, ui::I_TRASH, "Delete permanently?") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
+		bool cancel = ui::dialog_header(box, ui::I_TRASH, pending_empty ? "Empty the trash?" : "Delete permanently?") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
 		String what = pending.count == 1 ? string::tformat("\"%s\"", pending.at(0)) : string::tformat("%d items", pending.count);
 		String line = pending_fallback
 			? string::tformat("%d of %s %s on another drive and can't go to the trash.", pending_untrashable, what, pending_untrashable == 1 ? "is" : "are")
+			: pending_empty ? string::tformat("All %s in the trash will be deleted permanently.", pending.count == 1 ? "1 item" : string::tformat("%d items", pending.count))
 			: string::tformat("%s will be deleted permanently.", what);
 		ui::text_fit(line, box.x + 20, box.y + 62, box.width - 40, 15, ui::FG);
 		if (!txt::empty(&count_text)) ui::text_fit(txt::view(&count_text), box.x + 20, box.y + 88, box.width - 40, 15, ui::YELLOW);
 		ui::text_fit(pending_fallback ? "Delete those permanently and move the rest to the trash?" : "This cannot be undone.", box.x + 20, box.y + (pending_fallback ? 90 : 114), box.width - 40, 14, ui::FG4);
 		if (ui::button({ box.x + 20, box.y + 162, 200, 40 }, "Cancel")) cancel = true;
-		if (ui::button({ box.x + box.width - 220, box.y + 162, 200, 40 }, "Delete", DANGER))
+		if (ui::button({ box.x + box.width - 220, box.y + 162, 200, 40 }, pending_empty ? "Empty trash" : "Delete", DANGER))
 		{
 			confirm_open = false;
 			counter.close();
