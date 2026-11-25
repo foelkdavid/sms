@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix="sms-install-") as temporary:
     text = desktop.read_text()
     real_home = pwd.getpwuid(os.getuid()).pw_dir   # the launcher must use the test home, not the real one
     assert '@EXEC@' not in text and '--dir' in text and real_home not in text
-    for name in ('FONT-OFL.txt', 'RAYLIB-LICENSE.txt'):
+    for name in ('FONT-OFL.txt', 'RAYLIB-LICENSE.txt', 'BMU-LICENSE.txt'):
         assert (data / 'sms/licenses' / name).read_bytes() == (ROOT / 'licenses' / name).read_bytes()
     unrelated = data / 'sms/keep'
     unrelated.write_text('keep')
