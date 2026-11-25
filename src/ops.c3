@@ -139,6 +139,8 @@ float shown_frac;              // drawn bar fill, eased toward the real fraction
 ulong sample_bytes;            // bytes_done / active_time at the last detail refresh
 double sample_active;
 double recent_speed;           // bytes / s over the last few seconds (smoothed), 0 = none yet
+double shown_eta;              // seconds left as displayed: counts down, nudged toward the estimate (-1 = none yet)
+double eta_active;             // active_time when shown_eta was last updated
 
 fn bool busy() => job.busy();
 fn bool modal() => confirm_open || admin_open || new_open || ui::close_requested || (job.busy() && cur.state == CONFLICT);
@@ -251,6 +253,7 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 	sample_bytes = 0;
 	sample_active = 0;
 	recent_speed = 0;
+	shown_eta = -1;
 	apply_all = false;
 	if (kind != EXTRACT) open_after[0] = 0;
 	String what = names.len == 1 ? string::tformat("\"%s\"", names[0]) : string::tformat("%d items", names.len);
@@ -731,7 +734,14 @@ fn void update_detail() => @pool()
 					double avg = (double)cur.bytes_done / active_time;
 					double rate = recent_speed > 0 ? avg * 0.85 + recent_speed * 0.15 : avg;
 					size_text(&c, (ulong)rate);
-					if (rate > 1) { time_text(&d, (double)(cur.bytes_total - cur.bytes_done) / rate); }
+					if (rate > 1)
+					{
+						// Count down by the time passed, then move a fifth of the way to the new estimate.
+						double eta = (double)(cur.bytes_total - cur.bytes_done) / rate;
+						shown_eta = shown_eta < 0 ? eta : math::max(0.0, shown_eta - (active_time - eta_active)) * 0.8 + eta * 0.2;
+						eta_active = active_time;
+						time_text(&d, shown_eta);
+					}
 					else { txt::set(&d, "—"); }
 					txt::set(&detail, string::tformat("%s of %s · %s/s · %s left", txt::view(&a), txt::view(&b), txt::view(&c), txt::view(&d)));
 				}
