@@ -1,7 +1,7 @@
 module sms::ops;
 import std::math, std::core::string, libc;
 import raylib6::rl;
-import bmu::ui, bmu::txt, bmu::fileop;
+import bmu::ui, bmu::txt, bmu::fileop, bmu::sys;
 import sms::prefs, sms::openers;
 
 // File operations: clipboard (Ctrl+C / Ctrl+X / Ctrl+V), drag moves, Del / Shift+Del, one background
@@ -99,14 +99,26 @@ char[4096] req_dst;
 bool req_fallback;
 bool req_elevated;
 bool admin_open;
-bool admin_for_open;           // the dialog asks for "Open as sudo" (not a retry of a file operation)
-char[4096] sudo_path;          // file to open as sudo
+bool admin_for_open;           // the dialog asks for a program as sudo (not a retry of a file operation)
+// The program to run as sudo (Shift+right-click menus): command split like an opener, paths appended, run in sudo_cwd.
+char[1024] sudo_command;
+Names sudo_args;               // dir + names: the appended paths (count 0 = no arguments)
+char[4096] sudo_cwd;
+char[64] sudo_title;
 fileop::SudoRun[4] sudo_runs;  // programs started as root (each drained/reaped by its own thread)
 bool admin_delete;             // TRASH failed: the retry deletes permanently as root (root's trash is not yours)
 char[256] admin_pw;            // wiped on submit / cancel / close
 char[512] admin_error;
 const int ID_ADMIN_PW = 50;
 bool confirm_open;
+// New folder / new file (Ctrl+N, Ctrl+Shift+N, right-click): one name dialog, created in new_dir on the UI thread (one syscall).
+bool new_open;
+bool new_folder;
+char[256] new_name;
+char[4096] new_dir;
+char[160] new_error;
+char[256] created;             // the item just created, for the list to select after its reload ("" = none)
+const int ID_NEW_NAME = 51;
 bool pending_fallback;         // TRASH with permanent fallback for items on other drives
 int pending_untrashable;
 bool apply_all;
@@ -124,10 +136,49 @@ ulong sample_bytes;
 double speed;                  // bytes / s, smoothed
 
 fn bool busy() => job.busy();
-fn bool modal() => confirm_open || admin_open || ui::close_requested || (job.busy() && cur.state == CONFLICT);
+fn bool modal() => confirm_open || admin_open || new_open || ui::close_requested || (job.busy() && cur.state == CONFLICT);
 fn bool has_clip() => clip.count > 0;
 <* Entry names cut to the clipboard are drawn dimmed while their folder is shown. *>
 fn bool is_cut(String dir) => clip_cut && clip.count > 0 && txt::view(&clip.dir) == dir;
+
+<* Ask for the name of a new folder (or empty file) in `dir`. *>
+fn void ask_new(String dir, bool folder)
+{
+	txt::set(&new_dir, dir);
+	new_folder = folder;
+	new_name[0] = 0;
+	new_error[0] = 0;
+	new_open = true;
+	ui::focus_on(ID_NEW_NAME, &new_name);
+}
+
+<* Create the asked-for item; false (with new_error set) keeps the dialog open. *>
+fn bool create_new() => @pool()
+{
+	String name = txt::view(&new_name).trim();
+	if (!name.len) { txt::set(&new_error, "Enter a name"); return false; }
+	if (name == "." || name == ".." || name.contains("/")) { txt::set(&new_error, "A name can't be . or .. or contain /"); return false; }
+	ZString path = txt::join(txt::view(&new_dir), name).zstr_tcopy();
+	bool ok;
+	if (new_folder) { ok = sys::c_mkdir(path, 0o777) == 0; }
+	else
+	{
+		CInt fd = sys::c_open(path, sys::O_WRONLY | sys::O_CREAT | O_EXCL, 0o666);
+		ok = fd >= 0;
+		if (ok) sys::c_close(fd);
+	}
+	if (!ok)
+	{
+		int e = (int)libc::errno();
+		txt::set(&new_error, e == 17 ? "Something with this name already exists" : e == 13 || e == 1 ? "Permission denied" : e == 30 ? "Read-only file system" : "Could not create it");
+		return false;
+	}
+	txt::set(&created, name);
+	refresh = true;
+	return true;
+}
+
+const CInt O_EXCL = 0x80;
 
 fn bool take_refresh()
 {
@@ -145,6 +196,7 @@ fn void close()
 	sizer.close();
 	clip.free();
 	pending.free();
+	sudo_args.free();
 }
 
 fn String plural(int n, String one, String many) => n == 1 ? one : many;
@@ -358,18 +410,20 @@ fn void finished(fileop::Progress* p) => @pool()
 	}
 }
 
-<* Right-click → Open as sudo: ask for the password, then run the file's opener command as root. *>
-fn void ask_open_as_sudo(String path) => @pool()
+<*
+ Shift+right-click menus: ask for the password, then run `command` (split like an opener, no shell) as root in
+ `cwd` with `dir`/`names` appended as paths (none = no arguments). `what` describes it in the dialog.
+*>
+fn void ask_sudo(String title, String what, String command, String cwd, String dir, String[] names) => @pool()
 {
 	char[1024] storage;
 	ZString[openers::MAX_COMMAND_ARGS] cmd;
-	int n = openers::command_for(txt::basename(path), &storage, &cmd);
-	if (n == -1) { ui::toast("No matching file opener. Configure one with Ctrl+K.", ui::RED); return; }
-	if (n < 0) { ui::toast("This opener's command is empty or has an unclosed quote", ui::RED); return; }
-	txt::set(&sudo_path, path);
-	String shown;
-	for (int i = 0; i < n; i++) shown = i ? string::tformat("%s %s", shown, cmd[i].str_view()) : cmd[i].str_view().tcopy();
-	txt::set(&admin_error, string::tformat("%s with %s", txt::basename(path), shown));
+	if (openers::split_command(command, &storage, &cmd) < 0) { ui::toast("The command is empty or has an unclosed quote", ui::RED); return; }
+	if (names.len > openers::MAX_ARGS || !sudo_args.set(dir, names)) { ui::toast(string::tformat("Open as sudo takes at most %d items", openers::MAX_ARGS), ui::RED); return; }
+	txt::set(&sudo_command, command);
+	txt::set(&sudo_cwd, cwd);
+	txt::set(&sudo_title, title);
+	txt::set(&admin_error, string::tformat("%s: %s", what, command));
 	admin_for_open = true;
 	admin_delete = false;
 	ui::wipe(&admin_pw);
@@ -377,20 +431,28 @@ fn void ask_open_as_sudo(String path) => @pool()
 	ui::focus = ID_ADMIN_PW;
 }
 
+<* Open as sudo: the file's opener command as root. *>
+fn void ask_open_as_sudo(String path) => @pool()
+{
+	int rule = openers::rule_for(txt::basename(path));
+	if (rule < 0) { ui::toast("No matching file opener. Configure one with Ctrl+K.", ui::RED); return; }
+	String[1] one = { txt::basename(path) };
+	ask_sudo("Open as sudo", txt::basename(path), txt::view(&openers::rules[rule].executable), txt::dirname(path), txt::dirname(path), &one);
+}
+
 fn void open_as_sudo() => @pool()
 {
-	String path = txt::view(&sudo_path);
 	char[1024] storage;
 	ZString[openers::MAX_COMMAND_ARGS] cmd;
-	int n = openers::command_for(txt::basename(path), &storage, &cmd);
+	int n = openers::split_command(txt::view(&sudo_command), &storage, &cmd);
 	if (n < 0) { ui::wipe(&admin_pw); return; }
-	String[] argv = mem::talloc_array(String, (usz)n + 1);
+	String[] argv = mem::talloc_array(String, (usz)n + (usz)sudo_args.count);
 	for (int i = 0; i < n; i++) argv[i] = cmd[i].str_view();
-	argv[n] = path;
+	for (int i = 0; i < sudo_args.count; i++) argv[n + i] = txt::join(txt::view(&sudo_args.dir), sudo_args.at(i));
 	fileop::SudoRun* free_run;
 	foreach (&r : sudo_runs) if (!r.started) { free_run = r; break; }
 	if (!free_run) { ui::toast("Too many programs running as sudo", ui::RED); }
-	else if (!free_run.start(argv, &admin_pw)) { ui::toast("Could not start sudo", ui::RED); }
+	else if (!free_run.start(argv, &admin_pw, true, txt::view(&sudo_cwd))) { ui::toast("Could not start sudo", ui::RED); }
 	ui::wipe(&admin_pw);
 }
 
@@ -594,7 +656,7 @@ fn void draw_dialogs() => @pool()
 	else if (admin_open)
 	{
 		Rect box = ui::dialog(560, 264);
-		bool cancel = ui::dialog_header(box, ui::I_LOCK, admin_for_open ? "Open as sudo" : "Permission denied") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
+		bool cancel = ui::dialog_header(box, ui::I_LOCK, admin_for_open ? txt::view(&sudo_title) : "Permission denied") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
 		ui::text_fit(txt::view(&admin_error), box.x + 20, box.y + 60, box.width - 40, 14, ui::FG4);
 		if (admin_delete) ui::text_fit("Root can't use your trash: this deletes permanently.", box.x + 20, box.y + 86, box.width - 40, 14, ui::FG);
 		bool submitted;
@@ -643,6 +705,19 @@ fn void draw_dialogs() => @pool()
 			counter.close();
 			counting = false;
 		}
+	}
+	else if (new_open)
+	{
+		Rect box = ui::dialog(520, 240);
+		bool cancel = ui::dialog_header(box, new_folder ? ui::I_FOLDER : ui::I_FILE, new_folder ? "New folder" : "New file") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
+		String dir = txt::view(&new_dir);
+		ui::text_fit(string::tformat("in %s", dir == "/" ? "/" : txt::basename(dir)), box.x + 20, box.y + 60, box.width - 40, 14, ui::FG4);
+		bool submitted;
+		if (ui::input(ID_NEW_NAME, { box.x + 20, box.y + 88, box.width - 40, 40 }, &new_name, new_folder ? "Folder name" : "File name", &submitted)) new_error[0] = 0;
+		if (!txt::empty(&new_error)) ui::text_fit(txt::view(&new_error), box.x + 20, box.y + 140, box.width - 40, 14, ui::RED);
+		if (ui::button({ box.x + 20, box.y + 176, 200, 40 }, "Cancel")) cancel = true;
+		if ((ui::button({ box.x + box.width - 220, box.y + 176, 200, 40 }, "Create", PRIMARY) || submitted) && create_new()) { new_open = false; ui::unfocus(); }
+		else if (cancel) { new_open = false; ui::unfocus(); }
 	}
 	ui::layer = 0;
 }

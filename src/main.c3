@@ -1,5 +1,5 @@
 module sms;
-import std::math, std::core::string, std::io, libc;
+import std::math, std::core::string, std::io, std::collections::map, libc;
 import raylib6::rl;
 import bmu::ui, bmu::txt, bmu::sys, bmu::fileop, bmu::find, bmu::archive, bmu::picker, bmu::places;
 import sms::prefs, sms::preview, sms::settings, sms::openers, sms::openwith, sms::ops, sms::complete, sms::arc;
@@ -56,6 +56,12 @@ const int MENU_DIR = 2; // folder row or free list space: Open / Open terminal h
 int menu_entry = -1; // entry the file context menu is for
 char[4096] menu_dir; // folder the folder menu is for (a folder row, or the shown folder)
 bool menu_dir_row; // the folder menu came from a folder row (offers Open)
+bool menu_sudo; // Shift+right-click: the menu offers the "as sudo" variants only
+// Changes by other programs (another window, a download): inotify on the shown folder, re-listed after a short rest.
+sys::DirWatch watch;
+double watch_due; // 0 = nothing pending
+double watch_last;
+bool reloading; // reload(): keep the preview of a file that stays selected
 const int PICK_EXTRACT = 1;
 const String ARCHIVE_LABEL = "Archive (read-only)";
 float archive_label_w; // measured once (UI scale changes keep logical widths)
@@ -189,7 +195,7 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nArchives (zip, tar, 7z, rar, ...) open in sms unless an opener matches; right-click an archive: Browse, Extract here, Extract to.... Inside an archive (read-only) double-click opens a temporary copy.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace or -: parent; F5: refresh.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nArchives (zip, tar, 7z, rar, ...) open in sms unless an opener matches; right-click an archive: Browse, Extract here, Extract to.... Inside an archive (read-only) double-click opens a temporary copy.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace or -: parent; F5: re-read (changes show up by themselves); Ctrl+N / Ctrl+Shift+N: new folder / file; Shift+right-click: open as sudo.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
@@ -211,6 +217,7 @@ fn int main(String[] args)
 	defer ops::close();
 	defer size_job.close();
 	defer finder.close();
+	defer watch.close();
 	ui::app_args(args);
 	defer pick_names.free();
 	while (ui::running() && !arc::signalled) frame();
@@ -242,6 +249,8 @@ fn bool navigate(String path) => @pool()
 	stop_deep();
 	txt::set(&search, "");
 	refilter();
+	watch.watch(txt::view(&directory));
+	watch_due = 0;
 	return true;
 }
 
@@ -252,6 +261,8 @@ fn bool navigate_archive(String p) => @pool()
 	char[4096] inner;
 	if (!arc::locate(p, &file, &inner)) return false;
 	if (!arc::enter(txt::view(&file), txt::view(&inner))) return false;
+	watch.close(); // archives are read from memory; nothing to follow
+	watch_due = 0;
 	show_archive();
 	return true;
 }
@@ -366,7 +377,7 @@ fn void go_parent() => @pool()
 // Filter only on changes against the cached listing: no disk I/O or sorting.
 fn void refilter() => @pool()
 {
-	preview::clear();
+	if (!reloading) preview::clear();
 	clear_marks();
 	anchor = -1;
 	collapse_row = -1;
@@ -408,22 +419,105 @@ fn String[] marked_names()
 	return out[:n];
 }
 
-<* Re-list the current folder after a file operation, keeping search and scroll position. *>
+<*
+ Re-list the current folder after a file operation or a change by another program, keeping search, scroll, the
+ selection (by name) and cut marks; a folder created by ops is selected instead. A vanished folder goes to the
+ nearest existing parent.
+*>
 fn void reload() => @pool()
 {
 	float keep = scroll;
 	bool was_searching = searching;
 	bool was_deep = deep;
 	char[256] keep_search = search;
-	if (!navigate(txt::view(&directory).tcopy())) return;
+	String cursor = selected >= 0 ? txt::view(&entries[visible[selected]].name).tcopy() : "";
+	String anchor_name = anchor >= 0 && anchor < visible_count ? txt::view(&entries[visible[anchor]].name).tcopy() : "";
+	bool parent_cursor = selected == -2;
+	HashMap{String, bool} keep_marks;
+	keep_marks.tinit(math::max(16, marked_count * 2));
+	for (int i = 0; i < visible_count; i++) if (marked[i]) keep_marks[txt::view(&entries[visible[i]].name).tcopy()] = true;
+	String preview_name = selected >= 0 && preview::active ? cursor : "";
+	String made = txt::view(&ops::created).tcopy();
+	ops::created[0] = 0;
+	reloading = true;
+	bool listed = navigate(txt::view(&directory).tcopy());
+	reloading = false;
+	if (!listed)
+	{
+		preview::clear();
+		String up = txt::view(&directory).tcopy();
+		while (up != "/")
+		{
+			up = txt::dirname(up);
+			if (navigate(up)) { ui::toast("The folder was removed or moved: showing its parent", ui::YELLOW); return; }
+		}
+		return;
+	}
 	if (was_searching)
 	{
 		searching = true;
 		search = keep_search;
 		if (was_deep) { deep = true; deep_due = ui::now; refilter_keep_search(); }
-		else { refilter(); }
+		else { reloading = true; refilter(); reloading = false; }
 	}
 	scroll = keep;
+	if (ops::is_cut(txt::view(&directory)))
+	{
+		HashMap{String, bool} cut_names;
+		cut_names.tinit(math::max(16, ops::clip.count * 2));
+		for (int i = 0; i < ops::clip.count; i++) cut_names[ops::clip.at(i)] = true;
+		for (int i = 0; i < entry_count; i++) if (cut_names.has_key(txt::view(&entries[i].name))) { cut_entry[i] = true; any_cut = true; }
+	}
+	if (made.len)
+	{
+		for (int i = 0; i < visible_count; i++)
+		{
+			if (txt::view(&entries[visible[i]].name) != made) continue;
+			select_only(i);
+			float row_h = ROW * (float)prefs::content_percent / 100;
+			float y = (float)(i + (txt::view(&directory) == "/" || searching ? 0 : 1)) * row_h;
+			if (y < scroll || y + row_h > scroll + list_rect.height) scroll = math::max(0.0f, y - list_rect.height / 2);
+			return;
+		}
+	}
+	if (was_deep) return;
+	reloading = true;
+	int restored = -1;
+	for (int i = 0; i < visible_count; i++)
+	{
+		String name = txt::view(&entries[visible[i]].name);
+		if (keep_marks.len() && keep_marks.has_key(name)) mark(i, true);
+		if (name == cursor) restored = i;
+		if (name == anchor_name) anchor = i;
+	}
+	reloading = false;
+	if (parent_cursor) { selected = -2; }
+	else if (restored >= 0)
+	{
+		selected = restored;
+		// Same file still selected: its preview stays; anything else needs a new one.
+		if (!preview_name.len || preview_name != cursor) select_entry_preview(restored);
+	}
+	else { preview::clear(); }
+}
+
+<* (Re)request the preview for visible entry vi, as select_entry does. *>
+fn void select_entry_preview(int vi) => @pool()
+{
+	if (entries[visible[vi]].dir || arc::active) { preview::clear(); }
+	else { preview::select(txt::join(txt::view(&directory), txt::view(&entries[visible[vi]].name))); }
+}
+
+<* Once per frame: re-list after another program changed the shown folder (events rest 0.15 s, ≤ 2 re-lists/s),
+   but never under the user's hands (drag, selection box, menu, dialog, path editing) or while sms itself works. *>
+fn void poll_watch()
+{
+	if (watch.changed() && watch_due == 0) watch_due = math::max(ui::now + 0.15, watch_last + 0.5);
+	if (watch_due == 0 || ui::now < watch_due) return;
+	if (arc::active || deep || ops::busy() || ops::modal() || ui::top != 0 || pressed_entry >= 0 || dragging || band_pending || banding || ui::focused(ID_PATH)) return;
+	watch_due = 0;
+	watch_last = ui::now;
+	reload();
 }
 
 <* Mark band rows [lo, hi] (hi < lo = none); rows leaving the band return to their base state. *>
@@ -513,6 +607,7 @@ fn void select_entry(int vi) => @pool()
 {
 	if (selected == vi) return;
 	selected = vi;
+	if (reloading) return; // reload() decides about the preview once the selection is restored
 	if (vi < 0 || entries[visible[vi]].dir || arc::active) { preview::clear(); }
 	else { preview::select(txt::join(txt::view(&directory), txt::view(&entries[visible[vi]].name))); }
 }
@@ -981,10 +1076,11 @@ fn void poll_selection_size() => @pool()
 	compose_detail();
 }
 
-<* Right-click menu for a file: Open (its opener) or Open as sudo (same command as root, asks for the password). *>
+<* Right-click menu for a file: Open (its opener), Open with …, archive actions, New. With Shift: the same programs
+   as root (asks for the password). *>
 fn void file_menu() => @pool()
 {
-	if (!ui::menu_begin(MENU_FILE, 250)) return;
+	if (!ui::menu_begin(MENU_FILE, menu_sudo ? 320 : 250)) return;
 	bool valid = menu_entry >= 0 && menu_entry < entry_count;
 	String name = valid ? txt::view(&entries[menu_entry].name) : "";
 	String path = valid ? txt::join(txt::view(&directory), name) : "";
@@ -1000,8 +1096,14 @@ fn void file_menu() => @pool()
 		ui::menu_end();
 		return;
 	}
+	if (menu_sudo)
+	{
+		if (ui::menu_item("Open as sudo", ui::I_LOCK, "", valid)) ops::ask_open_as_sudo(path);
+		if (valid) openwith::menu_items(txt::view(&directory), menu_names(), true);
+		ui::menu_end();
+		return;
+	}
 	if (ui::menu_item("Open", ui::I_EXTERNAL, "Enter", valid)) openers::launch(path);
-	if (ui::menu_item("Open as sudo", ui::I_LOCK, "", valid)) ops::ask_open_as_sudo(path);
 	if (valid) openwith::menu_items(txt::view(&directory), menu_names());
 	if (valid && archive::is_archive(name))
 	{
@@ -1010,17 +1112,45 @@ fn void file_menu() => @pool()
 		if (ui::menu_item("Extract here", ui::I_FILE_ARCHIVE, "", idle)) ops::extract(path, "", {}, txt::view(&directory), true);
 		if (ui::menu_item("Extract to…", ui::I_FOLDER, "", idle)) ask_extract_to(path, "", {});
 	}
+	new_items();
 	ui::menu_end();
 }
 
-<* Right-click menu for a folder row or free list space: open it, or open a terminal there. *>
-fn void dir_menu()
+<* "New folder" / "New file" (in the shown folder) at the end of a menu. *>
+fn void new_items()
 {
-	if (!ui::menu_begin(MENU_DIR, 250)) return;
+	ui::menu_sep();
+	if (ui::menu_item("New folder", ui::I_FOLDER, "Ctrl+N")) ask_new(true);
+	if (ui::menu_item("New file", ui::I_FILE, "Ctrl+Shift+N")) ask_new(false);
+}
+
+fn void ask_new(bool folder)
+{
+	if (arc::active) { read_only(); return; }
+	if (deep) { ui::toast("Close the search of all subfolders first", ui::YELLOW); return; }
+	ops::ask_new(txt::view(&directory), folder);
+}
+
+<* Right-click menu for a folder row or free list space: open it, or open a terminal there. *>
+fn void dir_menu() => @pool()
+{
+	if (!ui::menu_begin(MENU_DIR, menu_sudo ? 320 : 250)) return;
 	String path = txt::view(&menu_dir);
+	if (menu_sudo)
+	{
+		if (ui::menu_item(menu_dir_row ? "Open in terminal as sudo" : "Open terminal here as sudo", ui::I_LOCK, ""))
+		{
+			if (txt::empty(&prefs::terminal)) { ui::toast("No terminal configured. Set one in Ctrl+K → General.", ui::RED); }
+			else { ops::ask_sudo("Open terminal as sudo", path == "/" ? "/" : txt::basename(path), txt::view(&prefs::terminal), path, path, {}); }
+		}
+		openwith::menu_items(path, {}, true);
+		ui::menu_end();
+		return;
+	}
 	if (menu_dir_row && ui::menu_item("Open", ui::I_FOLDER_OPEN, "Enter")) go(path);
 	if (ui::menu_item(menu_dir_row ? "Open in terminal" : "Open terminal here", ui::I_TERMINAL, "")) openers::open_terminal(path);
 	openwith::menu_items(path, {});
+	new_items();
 	ui::menu_end();
 }
 
@@ -1242,6 +1372,7 @@ fn void frame() => @pool()
 	ui::frame_begin(settings::open || ops::modal() || picker::open);
 	ops::poll();
 	if (ops::take_refresh()) reload();
+	poll_watch();
 	poll_archive();
 	int why;
 	String picked;
@@ -1320,6 +1451,7 @@ fn void frame() => @pool()
 			if (deep) { deep_due = ui::now; refilter_keep_search(); }
 			else { refilter(); }
 		}
+		if (ui::ctrl_down() && ui::letter('n')) ask_new(!ui::shift_down());
 		if (ui::ctrl_down() && ui::letter('s'))
 		{
 			prefs::sidebar = !prefs::sidebar;
@@ -1377,7 +1509,7 @@ fn void frame() => @pool()
 	{
 		// Tab, Enter or Down leave the search box for the first result.
 		bool tabbed = ui::focused(ID_SEARCH) && (rl::is_key_pressed(rl::RLKeyboardKey.TAB) || rl::is_key_pressed(rl::RLKeyboardKey.DOWN));
-		if (ui::input(ID_SEARCH, { 100, 12, w - 192, 36 }, &search, deep ? "Search all subfolders" : "Search this folder", &submitted, ui::I_SEARCH))
+		if (ui::input(ID_SEARCH, { 100, 12, w - 152, 36 }, &search, deep ? "Search all subfolders" : "Search this folder", &submitted, ui::I_SEARCH))
 		{
 			if (deep) { deep_due = ui::now + 0.15; deep_shown = -1; deep_pick = false; }
 			else { refilter(); }
@@ -1391,7 +1523,7 @@ fn void frame() => @pool()
 	else
 	{
 		// Folder completions: mouse first (a click must not reach the list below), then the field, then keys.
-		path_field = { 100, 12, w - 192, 36 };
+		path_field = { 100, 12, w - 152, 36 };
 		bool editing = ui::focused(ID_PATH);
 		if (editing) complete::mouse(path_field, &path_edit);
 		if (editing && complete::open) ui::input_arrows_free = true;
@@ -1420,12 +1552,11 @@ fn void frame() => @pool()
 			else if (visible_count) { select_only(0); }
 		}
 	}
-	if (ui::icon_button({ w - 84, 12, 32, 36 }, searching ? ui::I_TIMES : ui::I_SEARCH, ui::FG4, searching ? "Clear search (Escape)" : "Search this folder (Ctrl+F)"))
+	if (ui::icon_button({ w - 44, 12, 32, 36 }, searching ? ui::I_TIMES : ui::I_SEARCH, ui::FG4, searching ? "Clear search (Escape)" : "Search this folder (Ctrl+F)"))
 	{
 		if (searching) { close_search(); }
 		else { start_search(false); }
 	}
-	if (ui::icon_button({ w - 44, 12, 32, 36 }, ui::I_REFRESH, ui::FG4, "Refresh (F5)")) go(txt::view(&directory));
 	ui::hline(0, 59, w);
 
 	float left = 8;
@@ -1578,6 +1709,7 @@ fn void frame() => @pool()
 				{
 					txt::set(&menu_dir, txt::dirname(txt::view(&directory)));
 					menu_dir_row = true;
+					menu_sudo = shift;
 					ui::menu_open(MENU_DIR);
 					row_menu = true;
 				}
@@ -1589,11 +1721,12 @@ fn void frame() => @pool()
 			else if (hovered) { ui::panel(row, ui::BG1, 4); }
 			if (selected == vi && (marked_count > 1 || !marked[vi])) ui::outline(row, ui::BG4, 4);
 			if (hovered && entry.dir) hover_dir_entry = visible[vi];
-			// Right-click on a file: select it (keep a selection it belongs to) and offer Open / Open as sudo.
+			// Right-click on a file: select it (keep a selection it belongs to) and offer Open (Shift: the sudo menu).
 			if ((!entry.dir || arc::active) && ui::right_clicked(row))
 			{
 				if (!marked[vi]) select_only(vi);
 				menu_entry = visible[vi];
+				menu_sudo = shift && !arc::active;
 				ui::menu_open(MENU_FILE);
 				row_menu = true;
 			}
@@ -1603,6 +1736,7 @@ fn void frame() => @pool()
 				if (!marked[vi]) select_only(vi);
 				txt::set(&menu_dir, txt::join(txt::view(&directory), txt::view(&entry.name)));
 				menu_dir_row = true;
+				menu_sudo = shift;
 				ui::menu_open(MENU_DIR);
 				row_menu = true;
 			}
@@ -1676,6 +1810,7 @@ fn void frame() => @pool()
 		{
 			txt::set(&menu_dir, txt::view(&directory));
 			menu_dir_row = false;
+			menu_sudo = shift;
 			ui::menu_open(MENU_DIR);
 		}
 		draw_band(list);

@@ -1,7 +1,7 @@
 module sms::openwith;
 import std::io, std::core::string;
 import bmu::sys, bmu::txt, bmu::ui;
-import sms::prefs, sms::openers;
+import sms::prefs, sms::openers, sms::ops;
 
 <*
  "Open with" targets: named commands offered in the right-click menus of files, folders and free list space
@@ -181,8 +181,9 @@ fn bool launch(int t, String dir, String[] names) => @pool()
 	return openers::run(txt::view(&targets[t].command), paths, dir, OPEN_WITH);
 }
 
-<* Menu items "Open with NAME" for every target (inside an open ui::menu); `dir`/`names` as for launch. *>
-fn void menu_items(String dir, String[] names)
+<* Menu items "Open with NAME" for every target (inside an open ui::menu); `dir`/`names` as for launch.
+   `sudo`: "Open with NAME as sudo", run as root after the password dialog. *>
+fn void menu_items(String dir, String[] names, bool sudo = false)
 {
 	if (!count) return;
 	ui::menu_sep();
@@ -190,7 +191,14 @@ fn void menu_items(String dir, String[] names)
 	{
 		@pool()
 		{
-			if (ui::menu_item(string::tformat("Open with %s", txt::view(&targets[i].name)), icon[i], "")) launch(i, dir, names);
+			String name = txt::view(&targets[i].name);
+			if (!ui::menu_item(string::tformat(sudo ? "Open with %s as sudo" : "Open with %s", name), icon[i], "")) continue;
+			if (!sudo) { launch(i, dir, names); continue; }
+			String what = names.len == 1 ? names[0] : names.len ? string::tformat("%d items", names.len) : dir == "/" ? "/" : txt::basename(dir);
+			String[1] self = { "" };
+			// No names: the folder itself is the argument (dir = its parent + its name, as launch() does).
+			if (!names.len) { self[0] = dir == "/" ? "." : txt::basename(dir); ops::ask_sudo(string::tformat("Open with %s as sudo", name), what, txt::view(&targets[i].command), dir, dir == "/" ? "/" : txt::dirname(dir), &self); }
+			else { ops::ask_sudo(string::tformat("Open with %s as sudo", name), what, txt::view(&targets[i].command), dir, dir, names); }
 		};
 	}
 }

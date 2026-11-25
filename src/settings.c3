@@ -12,7 +12,7 @@ float rules_scroll;
 float targets_scroll;
 const float RULE_ROW = 44;
 const int ID_TERMINAL = 90;
-ui::Shortcut[55] shortcuts = {
+ui::Shortcut[*] shortcuts = {
 	{ "NAVIGATION", "", true },
 	{ "Up / Down", "Move selection (hold to repeat)", false },
 	{ "Enter", "Open selected folder, or open selected files", false },
@@ -20,7 +20,7 @@ ui::Shortcut[55] shortcuts = {
 	{ "Ctrl + L", "Edit folder path; Enter to go", false },
 	{ "Tab in path bar", "Complete folder (common part, then the highlighted one)", false },
 	{ "Up / Down in path bar", "Choose a suggested folder", false },
-	{ "F5", "Refresh current folder", false },
+	{ "F5", "Re-read the folder (changes by other programs show up by themselves)", false },
 	{ "SELECTION", "", true },
 	{ "Ctrl + click", "Add / remove one item", false },
 	{ "Shift + click", "Select a range (Ctrl + Shift adds it)", false },
@@ -32,6 +32,8 @@ ui::Shortcut[55] shortcuts = {
 	{ "FILES", "", true },
 	{ "Ctrl + C / Ctrl + X", "Copy / cut selected items", false },
 	{ "Ctrl + V", "Paste into this folder", false },
+	{ "Ctrl + N", "New folder", false },
+	{ "Ctrl + Shift + N", "New (empty) file", false },
 	{ "Delete", "Move to trash (or delete, see General)", false },
 	{ "Shift + Delete", "Delete permanently (asks first)", false },
 	{ "Drag onto a folder", "Move there; hold Ctrl to copy", false },
@@ -60,9 +62,10 @@ ui::Shortcut[55] shortcuts = {
 	{ "MOUSE", "", true },
 	{ "Single click", "Select a file or folder", false },
 	{ "Double click", "Open a file or folder", false },
-	{ "Right click a file", "Open, or open as sudo (asks for the password); archives: extract", false },
+	{ "Right click a file", "Open, Open with …; archives: extract; New folder / file", false },
 	{ "Right click a folder", "Open, or open it in the terminal (set in General)", false },
-	{ "Right click free space", "Open terminal here (in the shown folder)", false },
+	{ "Right click free space", "Open terminal here, New folder, New file", false },
+	{ "Shift + right click", "The same programs as sudo (asks for the password)", false },
 	{ "Open with …", "Your own programs in these menus (Ctrl+K → Open with)", false },
 	{ "Click ../", "Go to parent folder", false },
 	{ "Drag onto ../ or a place", "Move there; hold Ctrl to copy", false },
