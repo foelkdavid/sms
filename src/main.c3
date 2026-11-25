@@ -57,6 +57,7 @@ const int MENU_TRASH = 3; // the sidebar's Trash row: Open / Empty trash
 int menu_entry = -1; // entry the file context menu is for
 char[4096] menu_dir; // folder the folder menu is for (a folder row, or the shown folder)
 bool menu_dir_row; // the folder menu came from a folder row (offers Open)
+bool menu_dir_place; // ... from a sidebar place (no New: that would create in the shown folder, not the place)
 bool menu_sudo; // Shift+right-click: the menu offers the "as sudo" variants only
 // Changes by other programs (another window, a download): inotify on the shown folder, re-listed after a short rest.
 sys::DirWatch watch;
@@ -835,7 +836,17 @@ fn void sidebar_location(Rect row, String path, String name, String icon, bool t
 	float badge_w = badge.len ? ui::text_w(badge, 13) + 8 : 0;
 	ui::text_fit(name, row.x + 40, row.y + 12, row.width - 44 - badge_w, 16, ui::FG);
 	if (badge.len) ui::text(badge, row.x + row.width - badge_w, row.y + 14, 13, ui::GRAY);
-	if (trash && ui::right_clicked(row)) ui::menu_open(MENU_TRASH);
+	if (trash && ui::right_clicked(row)) { ui::menu_open(MENU_TRASH); }
+	else if (ui::right_clicked(row))
+	{
+		// A place: the folder menu (Open, terminal, Open with …; Shift: as sudo).
+		txt::set(&menu_dir, path);
+		menu_entry = -1;
+		menu_dir_row = true;
+		menu_dir_place = true;
+		menu_sudo = ui::shift_down();
+		ui::menu_open(MENU_DIR);
+	}
 	if (ui::clicked(row))
 	{
 		if (trash)
@@ -1169,7 +1180,7 @@ fn void dir_menu() => @pool()
 	if (ui::menu_item(menu_dir_row ? "Open in terminal" : "Open terminal here", ui::I_TERMINAL, "")) openers::open_terminal(path);
 	openwith::menu_items(path, {});
 	delete_items(menu_entry >= 0 && menu_entry < entry_count, false);
-	new_items();
+	if (!menu_dir_place) new_items();
 	ui::menu_end();
 }
 
@@ -1740,6 +1751,7 @@ fn void frame() => @pool()
 					menu_entry = -1; // ../ is never deleted from here
 					menu_dir_row = true;
 					menu_sudo = shift;
+					menu_dir_place = false;
 					ui::menu_open(MENU_DIR);
 					row_menu = true;
 				}
@@ -1768,6 +1780,7 @@ fn void frame() => @pool()
 				menu_entry = visible[vi];
 				menu_dir_row = true;
 				menu_sudo = shift;
+				menu_dir_place = false;
 				ui::menu_open(MENU_DIR);
 				row_menu = true;
 			}
@@ -1843,6 +1856,7 @@ fn void frame() => @pool()
 			menu_entry = -1;
 			menu_dir_row = false;
 			menu_sudo = shift;
+			menu_dir_place = false;
 			ui::menu_open(MENU_DIR);
 		}
 		draw_band(list);

@@ -66,6 +66,7 @@ ui::Shortcut[*] shortcuts = {
 	{ "Right click a folder", "Open, open in the terminal (General), Move to trash", false },
 	{ "Right click free space", "Open terminal here, New folder, New file", false },
 	{ "Shift + right click", "The programs as sudo (asks for the password), Delete permanently", false },
+	{ "Right click a location", "Open, open in the terminal, Open with … (Shift: as sudo)", false },
 	{ "Right click Trash", "Open, Empty trash (asks first; also the red button in the Trash)", false },
 	{ "Open with …", "Your own programs in these menus (Ctrl+K → Open with)", false },
 	{ "Click ../", "Go to parent folder", false },
