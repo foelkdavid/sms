@@ -28,7 +28,7 @@ ui::Shortcut[*] shortcuts = {
 	{ "Shift + Up / Down", "Extend the selection", false },
 	{ "Ctrl + A", "Select all", false },
 	{ "S", "Size selected folders, or this folder if nothing is selected", false },
-	{ "Drag on empty space", "Draw a selection box (Ctrl adds)", false },
+	{ "Drag on empty space", "Draw a selection box (Ctrl adds); also left of the icons", false },
 	{ "Escape / click empty", "Clear the selection", false },
 	{ "FILES", "", true },
 	{ "Ctrl + C / Ctrl + X", "Copy / cut selected items (also for other sms windows and file managers)", false },
