@@ -48,6 +48,7 @@ int band_hi = -1;
 bool[MAX_ENTRIES] band_base;
 bool[MAX_ENTRIES] cut_entry; // By entry index; dimmed while their cut is on the clipboard.
 bool any_cut;
+bool was_focused = true;
 char[4096] trash_files; // $XDG_DATA_HOME/Trash/files, resolved once at startup.
 bool drop_trash; // The current drag is over the sidebar's Trash row; reset every frame.
 Rect path_field; // the path bar, for drawing its completions on top of everything
@@ -197,7 +198,7 @@ fn int main(String[] args)
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nArchives (zip, tar, 7z, rar, ...) open in sms unless an opener matches; right-click an archive: Browse, Extract here, Extract to.... Inside an archive (read-only) double-click opens a temporary copy.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies).\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace or -: parent; F5: re-read (changes show up by themselves); Ctrl+N / Ctrl+Shift+N: new folder / file; Shift+right-click: open as sudo.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
+				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nArchives (zip, tar, 7z, rar, ...) open in sms unless an opener matches; right-click an archive: Browse, Extract here, Extract to.... Inside an archive (read-only) double-click opens a temporary copy.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel; works across sms windows and file managers); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies), also into another sms window; middle-click a folder: open it in a new window.\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace or -: parent; F5: re-read (changes show up by themselves); Ctrl+N / Ctrl+Shift+N: new folder / file; Shift+right-click: open as sudo.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
 				return 0;
 			default:
 				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
@@ -844,6 +845,7 @@ fn void sidebar_location(Rect row, String path, String name, String icon, bool t
 	float badge_w = badge.len ? ui::text_w(badge, 13) + 8 : 0;
 	ui::text_fit(name, row.x + 40, row.y + 12, row.width - 44 - badge_w, 16, ui::FG);
 	if (badge.len) ui::text(badge, row.x + row.width - badge_w, row.y + 14, 13, ui::GRAY);
+	if (!trash && ui::live() && ui::hover(row) && rl::is_mouse_button_pressed(rl::RLMouseButton.MIDDLE)) openers::open_window(path);
 	if (trash && ui::right_clicked(row)) { ui::menu_open(MENU_TRASH); }
 	else if (ui::right_clicked(row))
 	{
@@ -1185,6 +1187,7 @@ fn void dir_menu() => @pool()
 		return;
 	}
 	if (menu_dir_row && ui::menu_item("Open", ui::I_FOLDER_OPEN, "Enter")) go(path);
+	if (ui::menu_item("Open in new window", ui::I_EXTERNAL, menu_dir_row ? "Middle-click" : "")) openers::open_window(path);
 	if (ui::menu_item(menu_dir_row ? "Open in terminal" : "Open terminal here", ui::I_TERMINAL, "")) openers::open_terminal(path);
 	openwith::menu_items(path, {});
 	delete_items(menu_entry >= 0 && menu_entry < entry_count, false);
@@ -1304,10 +1307,29 @@ fn void update_drag()
 	float dx = mouse[0] - press_at[0];
 	float dy = mouse[1] - press_at[1];
 	if (dx * dx + dy * dy >= 36) dragging = true;
+	// Out of the window: hand the drag to the compositor (another sms window or app can take the drop).
+	if (dragging && !arc::active && !deep && marked_count && (mouse[0] < 0 || mouse[1] < 0 || mouse[0] >= ui::sw() || mouse[1] >= ui::sh()))
+	{
+		drag_out();
+		return;
+	}
 	if (!rl::is_mouse_button_down(rl::RLMouseButton.LEFT) && !rl::is_mouse_button_released(rl::RLMouseButton.LEFT))
 	{
 		pressed_entry = -1;
 		dragging = false;
+	}
+}
+
+<* Start a system drag of the marked items: move, or copy with Ctrl (as inside the window). *>
+fn void drag_out() => @pool()
+{
+	String[] names = marked_names();
+	if (!names.len) return;
+	if (ui::drag_start({ "text/uri-list", "application/x-bmu-drag-action" }, { ops::uri_list(txt::view(&directory), names), ui::ctrl_down() ? "copy" : "move" }))
+	{
+		pressed_entry = -1;
+		dragging = false;
+		collapse_row = -1;
 	}
 }
 
@@ -1338,8 +1360,9 @@ fn bool launch_marked() => @pool()
 }
 
 <*
- Files dropped from another app (file manager): copied into the folder under the pointer (folder row, ../,
- sidebar place) or the shown folder; onto Trash they are trashed. Handled once per drop, never per frame.
+ Files dropped from another window (another sms: moved, or copied when dragged with Ctrl; other apps: copied)
+ into the folder under the pointer (folder row, ../, sidebar place) or the shown folder; onto Trash they are
+ trashed. Handled once per drop, never per frame.
 *>
 fn void drop_from_app() => @pool()
 {
@@ -1371,7 +1394,7 @@ fn void drop_from_app() => @pool()
 	char[4096] real;
 	sys::realpath(&real, from);
 	if (txt::view(&real) == target) { ui::toast("Already in this folder", ui::YELLOW); return; }
-	ops::transfer(txt::view(&real), names, target, true);
+	ops::transfer(txt::view(&real), names, target, ui::drop_action() != "move");
 }
 
 fn void finish_drag(float h)
@@ -1418,6 +1441,10 @@ fn void frame() => @pool()
 {
 	ui::frame_begin(settings::open || ops::modal() || picker::open);
 	ops::poll();
+	// Back from another window: its copy/cut may have replaced ours on the system clipboard.
+	bool focused = rl::is_window_focused();
+	if (focused && !was_focused && ops::sync_clipboard()) clear_cut();
+	was_focused = focused;
 	if (ops::take_refresh()) reload();
 	poll_watch();
 	poll_archive();
@@ -1542,8 +1569,7 @@ fn void frame() => @pool()
 		if (ui::ctrl_down() && ui::letter('v'))
 		{
 			if (arc::active) { read_only(); }
-			else if (ops::has_clip()) { ops::paste(txt::view(&directory)); }
-			else { ui::toast("Nothing to paste: copy (Ctrl+C) or cut (Ctrl+X) first", ui::YELLOW); }
+			else if (!ops::paste(txt::view(&directory))) { ui::toast("Nothing to paste: copy (Ctrl+C) or cut (Ctrl+X) files first", ui::YELLOW); }
 		}
 		if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count && arc::active) { read_only(); }
 		else if (rl::is_key_pressed(rl::RLKeyboardKey.DELETE) && marked_count && !deep) { ops::remove(txt::view(&directory), marked_names(), ui::shift_down() || in_trash()); }
@@ -1779,6 +1805,10 @@ fn void frame() => @pool()
 				menu_sudo = shift && !arc::active;
 				ui::menu_open(MENU_FILE);
 				row_menu = true;
+			}
+			if (entry.dir && !arc::active && ui::live() && hovered && rl::is_mouse_button_pressed(rl::RLMouseButton.MIDDLE))
+			{
+				openers::open_window(txt::join(txt::view(&directory), txt::view(&entry.name)));
 			}
 			// Right-click on a folder: Open / Open in terminal.
 			else if (entry.dir && ui::right_clicked(row))

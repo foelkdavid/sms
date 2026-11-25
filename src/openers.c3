@@ -195,6 +195,27 @@ fn bool open_terminal(String dir) => @pool()
 	return run(txt::view(&prefs::terminal), {}, dir, TERMINAL);
 }
 
+<* Open `dir` in a new sms window: this binary again, detached (double fork; no opener slot, no zombie). *>
+fn bool open_window(String dir) => @pool()
+{
+	ZString[4] argv = { "sms", "--dir", dir.zstr_tcopy(), null };
+	int pid = sys::c_fork();
+	if (pid < 0) { ui::toast("Could not open a new window", ui::RED); return false; }
+	if (pid == 0)
+	{
+		sys::c_setsid();
+		if (sys::c_fork() == 0)
+		{
+			sys::c_execvpe("/proc/self/exe", &argv, sys::environ);
+			sys::c_exit(127);
+		}
+		sys::c_exit(0);
+	}
+	CInt status;
+	sys::c_waitpid(pid, &status, 0);
+	return true;
+}
+
 <*
  Start `command` (split without a shell) with `files` appended as literal arguments, in working directory `cwd`
  ("" = sms's own). Everything is prepared before fork; the child only changes directory and execs.

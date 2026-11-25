@@ -283,10 +283,78 @@ fn void extract(String archive_path, String inner, String[] names, String dst, b
 	if (!begin(EXTRACT, archive_path, names, dst)) open_after[0] = 0;
 }
 
+// The system clipboard carries copied files between sms windows and other file managers
+// (x-special/gnome-copied-files, text/uri-list, plain paths). clip_hash remembers what sms itself last put there
+// (or, for an archive copy, what was there), so Ctrl+V knows whether the internal clip is still the current one.
+ulong clip_hash;
+
+fn ulong text_hash(String s)
+{
+	ulong h = 0xcbf29ce484222325;
+	foreach (c : s) { h ^= c; h *= 0x100000001b3; }
+	return h;
+}
+
+<* "file:///dir/a\r\n…" for names in dir (temp). *>
+fn String uri_list(String dir, String[] names)
+{
+	DString d;
+	d.tinit();
+	foreach (n : names) { d.append(txt::file_uri(txt::join(dir, n))); d.append("\r\n"); }
+	return d.str_view();
+}
+
+<* What the system clipboard holds as files: gnome-copied-files text, else a plain uri-list (temp, "" = none). *>
+fn String system_files(bool* cut)
+{
+	String g = ui::clipboard_get_data("x-special/gnome-copied-files");
+	if (g.len)
+	{
+		*cut = g.starts_with("cut\n") || g.starts_with("cut\r");
+		return g;
+	}
+	*cut = false;
+	String u = ui::clipboard_get_data("text/uri-list");
+	return u.contains("file://") ? u : "";
+}
+
+fn void publish_clipboard(String dir, String[] names, bool cut) => @pool()
+{
+	String list = uri_list(dir, names);
+	DString g;
+	g.tinit();
+	g.append(cut ? "cut" : "copy");
+	DString plain;
+	plain.tinit();
+	foreach (i, n : names)
+	{
+		g.append("\n");
+		g.append(txt::file_uri(txt::join(dir, n)));
+		if (i) plain.append("\n");
+		plain.append(txt::join(dir, n));
+	}
+	ui::clipboard_set_data({ "x-special/gnome-copied-files", "text/uri-list", "text/plain;charset=utf-8" }, { g.str_view(), list, plain.str_view() });
+	clip_hash = text_hash(g.str_view());
+}
+
+<* The window got focus: when another window or app replaced the clipboard, forget the internal clip (and its
+   dimmed cut entries). Returns true when it was dropped. *>
+fn bool sync_clipboard() => @pool()
+{
+	if (!clip.count) return false;
+	bool cut;
+	if (text_hash(system_files(&cut)) == clip_hash) return false;
+	clip.free();
+	clip_cut = false;
+	clip_archive = false;
+	return true;
+}
+
 fn void set_clipboard(String dir, String[] names, bool cut) => @pool()
 {
 	if (!names.len) return;
 	if (!clip.set(dir, names)) { ui::toast("Too many items for the clipboard", ui::RED); return; }
+	publish_clipboard(dir, names, cut);
 	clip_cut = cut;
 	clip_archive = false;
 	ui::toast(string::tformat("%s %d %s", cut ? "Cut" : "Copied", names.len, plural((int)names.len, "item", "items")));
@@ -297,15 +365,58 @@ fn void set_archive_clipboard(String archive_path, String inner, String[] names)
 {
 	if (!names.len) return;
 	if (!clip.set(archive_path, names)) { ui::toast("Too many items for the clipboard", ui::RED); return; }
+	bool cut;
+	clip_hash = text_hash(system_files(&cut));   // internal only: current while the system clipboard stays as it is
 	clip_cut = false;
 	clip_archive = true;
 	txt::set(&clip_inner, inner);
 	ui::toast(string::tformat("Copied %d %s from the archive", names.len, plural((int)names.len, "item", "items")));
 }
 
-fn void paste(String dst) => @pool()
+<* Ctrl+V: the files on the system clipboard (from another sms window or file manager), or sms's own clip while
+   it is still the current one. Returns false when there is nothing to paste. *>
+fn bool paste(String dst) => @pool()
 {
-	if (!clip.count) return;
+	bool cut;
+	String sys_files = system_files(&cut);
+	bool ours = clip.count && text_hash(sys_files) == clip_hash;
+	if (!ours)
+	{
+		if (!sys_files.len) return false;
+		paste_system(sys_files, cut, dst);
+		return true;
+	}
+	paste_own(dst);
+	return true;
+}
+
+<* Paste files listed as URIs (one source folder, like a drop). A cut is moved and then cleared from the clipboard. *>
+fn void paste_system(String list, bool cut, String dst) => @pool()
+{
+	String from = "";
+	String[] names = mem::talloc_array(String, 4096);
+	int n;
+	foreach (line : list.tsplit("\n"))
+	{
+		String p = txt::uri_path(line.trim());
+		if (!p.len) continue;
+		if (!from.len) from = txt::dirname(p).tcopy();
+		if (txt::dirname(p) != from) { ui::toast("Paste items from one folder at a time", ui::RED); return; }
+		if (n >= 4096) { ui::toast("Too many items for the clipboard", ui::RED); return; }
+		names[n++] = txt::basename(p).tcopy();
+	}
+	if (!n) return;
+	char[4096] real;
+	sys::realpath(&real, from);
+	if (cut && txt::view(&real) == dst) return; // moving into the same folder changes nothing
+	if (begin(cut ? MOVE : COPY, txt::view(&real), names[:n], dst) && cut)
+	{
+		ui::clipboard_set_data({ "text/plain;charset=utf-8" }, { "" });   // a cut is pasted once
+	}
+}
+
+fn void paste_own(String dst) => @pool()
+{
 	if (clip_archive) { extract(txt::view(&clip.dir), txt::view(&clip_inner), clip.tview(), dst, false); return; }
 	if (clip_cut && txt::view(&clip.dir) == dst) return; // moving into the same folder changes nothing
 	if (begin(clip_cut ? MOVE : COPY, txt::view(&clip.dir), clip.tview(), dst)) job_clears_clip = clip_cut;
