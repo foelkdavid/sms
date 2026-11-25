@@ -111,20 +111,12 @@ fn void draw()
 	}
 	else if (tab == 2)
 	{
-		if (ui::checkbox(x + 4, area.y + 8, "Move deleted files to the trash", &prefs::trash)) { prefs::dirty = true; places::set_trash(prefs::trash); }
-		ui::text_fit(prefs::trash
-			? "Delete moves items to the trash. Shift + Delete deletes permanently (asks first)."
-			: "Delete removes items permanently after a confirmation. Nothing goes to the trash.", x + 4, area.y + 44, width - 8, 14, ui::FG4);
-		if (ui::checkbox(x + 4, area.y + 84, "Double-click in an archive opens a temporary copy", &prefs::archive_open)) prefs::dirty = true;
-		ui::text_fit(prefs::archive_open
-			? "Double-click extracts the file to a temporary folder and opens it. Temporary copies are deleted when sms closes."
-			: "Off: archives are view only (always read-only either way); right-click and Extract files to open them.", x + 4, area.y + 120, width - 8, 14, ui::FG4);
+		if (ui::checkbox(x + 4, area.y + 8, "Enable Trash", &prefs::trash)) { prefs::dirty = true; places::set_trash(prefs::trash); }
+		if (ui::checkbox(x + 4, area.y + 48, "Enable Archive copies", &prefs::archive_open)) prefs::dirty = true;
 		bool dl = places::downloads;
-		if (ui::checkbox(x + 4, area.y + 160, "Show Downloads in the sidebar", &dl)) places::set_downloads(dl);
-		ui::text_fit("The sidebar (Downloads, Trash, saved locations) is shared with the file pickers of other bmu apps.", x + 4, area.y + 196, width - 8, 14, ui::FG4);
-		ui::label(x + 4, area.y + 240, "TERMINAL");
-		if (ui::input(ID_TERMINAL, { x + 4, area.y + 260, width - 8, 36 }, &prefs::terminal, "foot   (or: alacritty, kitty, wezterm start)", null, ui::I_TERMINAL)) prefs::dirty = true;
-		ui::text_fit("Right-click a folder or free list space: Open terminal here. Command + arguments, no shell; it starts in that folder.", x + 4, area.y + 304, width - 8, 14, ui::FG4);
+		if (ui::checkbox(x + 4, area.y + 88, "Show Downloads in Sidebar", &dl)) places::set_downloads(dl);
+		ui::label(x + 4, area.y + 136, "TERMINAL");
+		if (ui::input(ID_TERMINAL, { x + 4, area.y + 156, width - 8, 36 }, &prefs::terminal, "foot", null, ui::I_TERMINAL)) prefs::dirty = true;
 	}
 	else
 	{
