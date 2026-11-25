@@ -132,9 +132,13 @@ char[256] job_target;
 double job_started;
 char[160] title;
 char[160] detail;
-double sample_time;
-ulong sample_bytes;
-double speed;                  // bytes / s, smoothed
+double sample_time;            // last detail-text refresh
+double last_poll;
+double active_time;            // seconds spent transferring (no scanning, no conflict dialog)
+float shown_frac;              // drawn bar fill, eased toward the real fraction
+ulong sample_bytes;            // bytes_done / active_time at the last detail refresh
+double sample_active;
+double recent_speed;           // bytes / s over the last few seconds (smoothed), 0 = none yet
 
 fn bool busy() => job.busy();
 fn bool modal() => confirm_open || admin_open || new_open || ui::close_requested || (job.busy() && cur.state == CONFLICT);
@@ -241,8 +245,12 @@ fn bool begin(fileop::Kind kind, String src_dir, String[] names, String dst_dir 
 	txt::set(&job_target, dst_dir == "/" ? "/" : txt::basename(dst_dir));
 	job_started = ui::now;
 	sample_time = ui::now;
+	last_poll = ui::now;
+	active_time = 0;
+	shown_frac = 0;
 	sample_bytes = 0;
-	speed = 0;
+	sample_active = 0;
+	recent_speed = 0;
 	apply_all = false;
 	if (kind != EXTRACT) open_after[0] = 0;
 	String what = names.len == 1 ? string::tformat("\"%s\"", names[0]) : string::tformat("%d items", names.len);
@@ -487,8 +495,14 @@ fn void poll() => @pool()
 	else if (job.busy())
 	{
 		job.status(&cur);
-		if (ui::now - sample_time >= 0.25) update_detail();
+		double dt = math::min(ui::now - last_poll, 0.25);
+		if (cur.state != SCANNING && cur.state != CONFLICT) active_time += dt;
+		// Ease the bar toward the real fraction (~0.3 s), never backwards: flushes arrive in steps.
+		float target = math::max(shown_frac, progress_frac());
+		shown_frac += (target - shown_frac) * (float)math::min(1.0, dt * 8);
+		if (ui::now - sample_time >= 0.5) update_detail();
 	}
+	last_poll = ui::now;
 	ui::hold_close = job.busy();
 	if (ui::close_requested && !job.busy()) ui::quit = true;
 }
@@ -671,16 +685,28 @@ fn void update_count() => @pool()
 	}
 }
 
+<* Real progress 0..1 of the running job: bytes when known, else files. *>
+fn float progress_frac()
+{
+	if (cur.state == FINISHING) return 1;
+	if (cur.bytes_total > 0) return math::min(1.0f, (float)cur.bytes_done / (float)cur.bytes_total);
+	if (cur.files_total > 0) return math::min(1.0f, (float)cur.files_done / (float)cur.files_total);
+	return 0;
+}
+
+<* Speed and ETA mostly from the whole run so far (average), with a little recent speed blended in: calm, yet it
+   follows a lasting change (small files, then big ones). *>
 fn void update_detail() => @pool()
 {
-	double dt = ui::now - sample_time;
-	if (cur.bytes_done >= sample_bytes && dt > 0)
-	{
-		double now_speed = (double)(cur.bytes_done - sample_bytes) / dt;
-		speed = speed <= 0 ? now_speed : speed * 0.7 + now_speed * 0.3;
-	}
 	sample_time = ui::now;
-	sample_bytes = cur.bytes_done;
+	double da = active_time - sample_active;
+	if (da > 0.2 && cur.bytes_done >= sample_bytes)
+	{
+		double now_speed = (double)(cur.bytes_done - sample_bytes) / da;
+		recent_speed = recent_speed <= 0 ? now_speed : recent_speed * 0.8 + now_speed * 0.2;
+		sample_bytes = cur.bytes_done;
+		sample_active = active_time;
+	}
 	char[32] a, b, c, d;
 	switch (cur.state)
 	{
@@ -695,10 +721,20 @@ fn void update_detail() => @pool()
 			{
 				size_text(&a, cur.bytes_done);
 				size_text(&b, cur.bytes_total);
-				size_text(&c, (ulong)speed);
-				if (speed > 1) { time_text(&d, (double)(cur.bytes_total - cur.bytes_done) / speed); }
-				else { txt::set(&d, "—"); }
-				txt::set(&detail, string::tformat("%s of %s · %s/s · %s left", txt::view(&a), txt::view(&b), txt::view(&c), txt::view(&d)));
+				double f = (double)cur.bytes_done / (double)cur.bytes_total;
+				if (active_time < 1.5 || f < 0.005)
+				{
+					txt::set(&detail, string::tformat("%s of %s · estimating…", txt::view(&a), txt::view(&b)));
+				}
+				else
+				{
+					double avg = (double)cur.bytes_done / active_time;
+					double rate = recent_speed > 0 ? avg * 0.85 + recent_speed * 0.15 : avg;
+					size_text(&c, (ulong)rate);
+					if (rate > 1) { time_text(&d, (double)(cur.bytes_total - cur.bytes_done) / rate); }
+					else { txt::set(&d, "—"); }
+					txt::set(&detail, string::tformat("%s of %s · %s/s · %s left", txt::view(&a), txt::view(&b), txt::view(&c), txt::view(&d)));
+				}
 			}
 			else
 			{
@@ -723,10 +759,7 @@ fn void draw_panel(Rect r)
 	ui::text_fit(txt::view(&title), x + 28, r.y + 13, w - 76, 16, ui::FG);
 	bool can = cur.can_cancel;
 	if (ui::icon_button({ r.x + r.width - 44, r.y + 8, 32, 30 }, ui::I_TIMES, can ? ui::FG4 : ui::BG3, can ? "Cancel (changes are rolled back)" : "Finishing…") && can) job.cancel();
-	float frac;
-	if (cur.bytes_total > 0) { frac = (float)cur.bytes_done / (float)cur.bytes_total; }
-	else if (cur.files_total > 0) { frac = (float)cur.files_done / (float)cur.files_total; }
-	if (cur.state == FINISHING) frac = 1;
+	float frac = shown_frac;
 	Rect bar = { x, r.y + 42, w, 8 };
 	ui::panel(bar, ui::BG1, 4);
 	if (cur.state == SCANNING || cur.state == CONFLICT)
