@@ -432,7 +432,15 @@ fn void update_busy() => @pool()
 
 fn String busy_verb(char k, bool queued = false)
 {
-	if (queued) return "Queued";
+	switch ((fileop::Kind)(k - 1))
+	{
+		case COPY: if (queued) return "Queued to copy";
+		case MOVE: if (queued) return "Queued to move";
+		case TRASH: if (queued) return "Queued for the trash";
+		case DELETE: if (queued) return "Queued to delete";
+		case RESTORE: if (queued) return "Queued to restore";
+		default: if (queued) return "Queued";
+	}
 	switch ((fileop::Kind)(k - 1))
 	{
 		case COPY: return "Being copied";
@@ -480,16 +488,18 @@ fn void draw_busy_row(Rect row, sys::Entry* entry, char kind, int e, float icon_
 	float cs = prefs::content_percent / 100.0f;
 	ui::text(row_icon(entry), row.x + 12 * cs, row.y + (row_h - icon_size) / 2, icon_size, ui::BG3);
 	float tx = row.x + 60 * cs;
-	float tw = math::max(0.0f, row.width - 72 * cs - 150);
+	float tw = math::max(0.0f, row.width - 72 * cs - 190);
 	ui::text_fit(txt::view(&entry.name), tx, row.y + (row_h - text_size) / 2, tw, text_size, ui::GRAY);
 	fileop::Kind k = (fileop::Kind)(kind - 1);
 	String icon = k == TRASH || k == DELETE ? ui::I_TRASH : k == MOVE ? ui::I_CUT : k == RESTORE ? ui::I_UNDO : ui::I_COPY;
-	float pulse = 0.55f + 0.45f * math::sin((float)ui::now * 4.0f);
-	Color c = ui::AQUA;
+	// Running: the operation's icon pulses; queued: the same icon, still and dim.
+	bool queued = busy_queued[e];
+	float pulse = queued ? 0.45f : 0.55f + 0.45f * math::sin((float)ui::now * 4.0f);
+	Color c = queued ? ui::GRAY : ui::AQUA;
 	c.a = (char)(255 * pulse);
-	float rx = row.x + row.width - 140;
+	float rx = row.x + row.width - 180;
 	ui::text(icon, rx, row.y + (row_h - 16) / 2, 16, c);
-	ui::text_fit(busy_verb(kind, busy_queued[e]), rx + 24, row.y + (row_h - 13) / 2, 116, 13, ui::GRAY);
+	ui::text_fit(busy_verb(kind, queued), rx + 24, row.y + (row_h - 13) / 2, 156, 13, ui::GRAY);
 	if (!busy_own[e]) return;
 	fileop::ItemProgress ip;
 	if (!ops::item_status(busy_job[e], busy_item[e], &ip)) return;
