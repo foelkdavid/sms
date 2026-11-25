@@ -245,6 +245,7 @@ fn int main(String[] args)
 	if (select_name.len) for (int vi = 0; vi < visible_count; vi++) if (txt::view(&entries[visible[vi]].name) == select_name) { select_only(vi); break; }
 	ui::load_font(&openwith::ICON_CODEPOINTS); // the program icons of "Open with" entries
 	defer ui::close();
+	defer settings::close();
 	defer preview::close();
 	defer arc::cleanup(); // after ops::close: no extraction into the temporary folder is running
 	defer ops::close();

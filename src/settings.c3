@@ -1,7 +1,7 @@
 module sms::settings;
 import std::math;
 import raylib6::rl;
-import bmu::ui, bmu::txt;
+import bmu::ui, bmu::txt, bmu::desktop;
 import sms::openers, sms::openwith, sms::prefs;
 import std::core::string, std::io, bmu::sys, bmu::fileop, bmu::places;
 
@@ -10,6 +10,10 @@ int tab;
 float shortcuts_scroll;
 float rules_scroll;
 float targets_scroll;
+float general_scroll;
+desktop::DefaultHandler default_handler;
+desktop::HandlerStatus default_status;
+bool default_notice;
 const float RULE_ROW = 44;
 const int ID_TERMINAL = 90;
 const int ID_OPERATIONS = 91;
@@ -93,11 +97,38 @@ fn void toggle()
 {
 	open = !open;
 	ui::unfocus();
+	if (open) refresh_default();
+}
+
+fn void refresh_default(bool make_default = false)
+{
+	default_handler.poll(&default_status);
+	if (default_status.busy) return;
+	if (!default_handler.request("inode/directory", "sms.desktop", make_default))
+	{
+		default_status = {};
+		txt::set(&default_status.error, "Could not start desktop integration");
+		return;
+	}
+	default_notice = make_default;
+	default_handler.poll(&default_status);
+}
+
+fn void close()
+{
+	default_handler.close();
 }
 
 fn void draw()
 {
 	if (!open) return;
+	default_handler.poll(&default_status);
+	if (default_notice && !default_status.busy)
+	{
+		default_notice = false;
+		if (txt::empty(&default_status.error) && default_status.is_default) { ui::toast("sms is now the default file manager"); }
+		else { ui::toast(txt::view(&default_status.error), ui::RED); }
+	}
 	if (rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { open = false; ui::unfocus(); return; }
 	ui::layer = 1;
 	Rect box = ui::dialog(780, 600);
@@ -109,7 +140,7 @@ fn void draw()
 	if (ui::button({ x, y, tab_w, 36 }, "Shortcuts", tab == 0 ? PRIMARY : NORMAL)) { tab = 0; ui::unfocus(); }
 	if (ui::button({ x + tab_w + 8, y, tab_w, 36 }, "File openers", tab == 1 ? PRIMARY : NORMAL)) { tab = 1; ui::unfocus(); }
 	if (ui::button({ x + (tab_w + 8) * 2, y, tab_w, 36 }, "Open with", tab == 4 ? PRIMARY : NORMAL)) { tab = 4; ui::unfocus(); }
-	if (ui::button({ x + (tab_w + 8) * 3, y, tab_w, 36 }, "General", tab == 2 ? PRIMARY : NORMAL)) { tab = 2; ui::unfocus(); }
+	if (ui::button({ x + (tab_w + 8) * 3, y, tab_w, 36 }, "General", tab == 2 ? PRIMARY : NORMAL)) { tab = 2; ui::unfocus(); refresh_default(); }
 	if (ui::button({ x + (tab_w + 8) * 4, y, tab_w, 36 }, "About", tab == 3 ? PRIMARY : NORMAL)) { tab = 3; ui::unfocus(); collect_about(); }
 	Rect area = { x, y + 48, width, box.height - 118 };
 	if (tab == 0)
@@ -126,6 +157,11 @@ fn void draw()
 	}
 	else if (tab == 2)
 	{
+		float content = 364;
+		general_scroll = ui::scroll_wheel(area, general_scroll, content);
+		ui::begin_clip(area);
+		Rect view = area;
+		area.y -= general_scroll;
 		if (ui::checkbox(x + 4, area.y + 8, "Enable Trash", &prefs::trash)) { prefs::dirty = true; places::set_trash(prefs::trash); }
 		if (ui::checkbox(x + 4, area.y + 48, "Enable Archive copies", &prefs::archive_open)) prefs::dirty = true;
 		bool dl = places::downloads;
@@ -139,6 +175,14 @@ fn void draw()
 			prefs::operations = mode;
 			prefs::dirty = true;
 		}
+		ui::label(x + 4, area.y + 292, "DEFAULT FILE MANAGER");
+		float button_w = math::min(240.0f, (width - 16) * 0.5f);
+		if (ui::button({ x + 4, area.y + 312, button_w, 36 }, "Make default file manager", enabled: !default_status.busy && !default_status.is_default)) refresh_default(true);
+		String status = default_status.busy ? "Checking…" : default_status.is_default ? "sms is the default" : "sms is not the default";
+		if (!txt::empty(&default_status.error)) status = txt::view(&default_status.error);
+		ui::text_fit(status, x + button_w + 16, area.y + 322, width - button_w - 20, 14, !txt::empty(&default_status.error) ? ui::RED : default_status.is_default ? ui::GREEN : ui::FG4);
+		ui::end_clip();
+		ui::scrollbar(view, general_scroll, content);
 	}
 	else
 	{
