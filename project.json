@@ -1,6 +1,6 @@
 {
   "langrev": "1",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "opt": "O2",
   "build-dir": "build",
   "output": "build",

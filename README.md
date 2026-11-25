@@ -53,7 +53,7 @@ Settings and saved locations live in `~/.config/sms/`.
 | | used for | license |
 |---|---|---|
 | [C3](https://c3-lang.org) ([c3c](https://github.com/c3lang/c3c)) | language, compiler, standard library | [compiler LGPL-3.0, standard library MIT](https://github.com/c3lang/c3c#licensing) |
-| [bmu](https://github.com/foelkdavid/bmu) | UI toolkit (submodule) | not chosen yet |
+| [bmu](https://github.com/foelkdavid/bmu) | UI toolkit (submodule) | [MIT](https://github.com/foelkdavid/bmu/blob/main/LICENSE) |
 | [raylib](https://www.raylib.com) 6.0 | window, input, drawing (static) | [zlib](licenses/RAYLIB-LICENSE.txt) |
 | [GLFW](https://www.glfw.org) 3.4 | Wayland window backend, inside raylib | [zlib](https://www.glfw.org/license.html) |
 | [CodeNewRoman Nerd Font Propo](https://www.nerdfonts.com/font-downloads) | embedded UI font ([Code New Roman](https://github.com/ryanoasis/nerd-fonts/tree/master/patched-fonts/CodeNewRoman) by Sam Radian + [Nerd Fonts](https://github.com/ryanoasis/nerd-fonts) icons) | [SIL OFL 1.1](licenses/FONT-OFL.txt) |
