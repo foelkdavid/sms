@@ -497,7 +497,9 @@ fn void poll() => @pool()
 	}
 	else if (job.busy())
 	{
+		bool was_removing = cur.remove_total > 0;
 		job.status(&cur);
+		if (cur.remove_total > 0 && !was_removing) { shown_frac = 0; sample_time = 0; } // new step: bar restarts, text now
 		double dt = math::min(ui::now - last_poll, 0.25);
 		if (cur.state != SCANNING && cur.state != CONFLICT) active_time += dt;
 		// Ease the bar toward the real fraction (~0.3 s), never backwards: flushes arrive in steps.
@@ -691,6 +693,7 @@ fn void update_count() => @pool()
 <* Real progress 0..1 of the running job: bytes when known, else files. *>
 fn float progress_frac()
 {
+	if (cur.remove_total > 0) return math::min(1.0f, (float)cur.removed / (float)cur.remove_total);
 	if (cur.state == FINISHING) return 1;
 	if (cur.bytes_total > 0) return math::min(1.0f, (float)cur.bytes_done / (float)cur.bytes_total);
 	if (cur.files_total > 0) return math::min(1.0f, (float)cur.files_done / (float)cur.files_total);
@@ -718,6 +721,13 @@ fn void update_detail() => @pool()
 			size_text(&a, cur.bytes_total);
 			txt::set(&detail, string::tformat("Preparing… %d files, %s", cur.files_total, txt::view(&a)));
 		case FINISHING:
+			if (cur.remove_total > 0)
+			{
+				group_digits(&a, cur.removed);
+				group_digits(&b, cur.remove_total);
+				txt::set(&detail, string::tformat("Removing originals… %s of %s", txt::view(&a), txt::view(&b)));
+				break;
+			}
 			txt::set(&detail, cur.can_cancel ? "Finishing…" : txt::view(&cur.current) == "Undoing" ? "Undoing changes…" : "Finishing…");
 		default:
 			if (cur.bytes_total > 0)
