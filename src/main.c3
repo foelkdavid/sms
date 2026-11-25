@@ -47,6 +47,13 @@ int band_lo;
 int band_hi = -1;
 bool[MAX_ENTRIES] band_base;
 bool[MAX_ENTRIES] cut_entry; // By entry index; dimmed while their cut is on the clipboard.
+// Entries inside a running file operation (this window's or another sms window's, via bmu's fileop registry):
+// not selectable, drawn with a busy indicator. Recomputed on listing and on registry changes, never per frame.
+fileop::Busy busy;
+char[MAX_ENTRIES] busy_kind;  // by entry index: 0 = free, else fileop::Kind + 1
+int[MAX_ENTRIES] busy_item;   // its index in that job (own job: ops::job.item_status)
+bool[MAX_ENTRIES] busy_own;
+bool any_busy;
 bool any_cut;
 bool was_focused = true;
 char[4096] trash_files; // $XDG_DATA_HOME/Trash/files, resolved once at startup.
@@ -156,9 +163,11 @@ bool dragging;
 rl::RLVector2 press_at;
 char[4096] drag_path;
 
+fn bool is_busy(int vi) => any_busy && vi >= 0 && vi < visible_count && busy_kind[visible[vi]] != 0;
+
 fn void mark(int vi, bool on)
 {
-	if (marked[vi] == on) return;
+	if (marked[vi] == on || (on && is_busy(vi))) return;
 	marked[vi] = on;
 	marked_count += on ? 1 : -1;
 }
@@ -213,6 +222,9 @@ fn int main(String[] args)
 	if (!navigate(start)) { io::eprintfn("sms: cannot read folder: %s", start); return 1; }
 	ui::open("sms", 900, 640, 480, 320, (float)prefs::ui_percent / 100);
 	ui::zoom_shift_only = true;
+	busy.open();
+	update_busy();
+	defer busy.close();
 	ui::load_font(&openwith::ICON_CODEPOINTS); // the program icons of "Open with" entries
 	defer ui::close();
 	defer preview::close();
@@ -386,8 +398,41 @@ fn void go_parent() => @pool()
 }
 
 // Filter only on changes against the cached listing: no disk I/O or sorting.
+<* Which entries belong to a running file operation (on listing and when the registry changes). *>
+fn void update_busy() => @pool()
+{
+	if (any_busy) { for (int i = 0; i < entry_count; i++) busy_kind[i] = 0; }
+	any_busy = false;
+	if (arc::active || !busy.has_dir(txt::view(&directory))) return;
+	for (int i = 0; i < entry_count; i++)
+	{
+		fileop::BusyHit h = busy.find(txt::view(&directory), txt::view(&entries[i].name));
+		if (!h.found) continue;
+		busy_kind[i] = (char)((int)h.kind + 1);
+		busy_item[i] = h.item;
+		busy_own[i] = h.own;
+		any_busy = true;
+	}
+	// Items that just became busy leave the selection (they cannot be acted on now).
+	for (int vi = 0; vi < visible_count && any_busy && marked_count; vi++) if (marked[vi] && is_busy(vi)) mark(vi, false);
+}
+
+fn String busy_verb(char k)
+{
+	switch ((fileop::Kind)(k - 1))
+	{
+		case COPY: return "Being copied";
+		case MOVE: return "Being moved";
+		case TRASH: return "Moving to the trash";
+		case DELETE: return "Being deleted";
+		case RESTORE: return "Being restored";
+		default: return "Busy";
+	}
+}
+
 fn void refilter() => @pool()
 {
+	update_busy();
 	if (!reloading) preview::clear();
 	clear_marks();
 	anchor = -1;
@@ -412,6 +457,34 @@ fn void refilter() => @pool()
 	dragging = false;
 	band_pending = false;
 	banding = false;
+}
+
+<* A row that belongs to a running operation: dimmed, the operation's icon pulsing at the right; for this
+   window's own job also the item's progress as a thin bar under the name. *>
+fn void draw_busy_row(Rect row, sys::Entry* entry, char kind, int e, float icon_size, float text_size, float row_h) => @pool()
+{
+	float cs = prefs::content_percent / 100.0f;
+	ui::text(row_icon(entry), row.x + 12 * cs, row.y + (row_h - icon_size) / 2, icon_size, ui::BG3);
+	float tx = row.x + 60 * cs;
+	float tw = math::max(0.0f, row.width - 72 * cs - 150);
+	ui::text_fit(txt::view(&entry.name), tx, row.y + (row_h - text_size) / 2, tw, text_size, ui::GRAY);
+	fileop::Kind k = (fileop::Kind)(kind - 1);
+	String icon = k == TRASH || k == DELETE ? ui::I_TRASH : k == MOVE ? ui::I_CUT : k == RESTORE ? ui::I_UNDO : ui::I_COPY;
+	float pulse = 0.55f + 0.45f * math::sin((float)ui::now * 4.0f);
+	Color c = ui::AQUA;
+	c.a = (char)(255 * pulse);
+	float rx = row.x + row.width - 140;
+	ui::text(icon, rx, row.y + (row_h - 16) / 2, 16, c);
+	ui::text_fit(busy_verb(kind), rx + 24, row.y + (row_h - 13) / 2, 116, 13, ui::GRAY);
+	if (!busy_own[e]) return;
+	fileop::ItemProgress[1] ip;
+	if (ops::job.item_status(busy_item[e], &ip) != 1) return;
+	float f = ip[0].bytes_total ? (float)ip[0].bytes_done / (float)ip[0].bytes_total : ip[0].files_total ? (float)ip[0].files_done / (float)ip[0].files_total : 0;
+	if (ip[0].state == DONE) f = 1;
+	if (ip[0].state == WAITING && f <= 0) return;
+	float by = row.y + row_h - 8 * cs;
+	ui::panel({ tx, by, tw, 3 }, ui::BG1, 1);
+	if (f > 0) ui::panel({ tx, by, math::max(3.0f, tw * math::min(f, 1.0f)), 3 }, ui::AQUA, 1);
 }
 
 fn void clear_cut()
@@ -1446,6 +1519,7 @@ fn void frame() => @pool()
 	if (focused && !was_focused && ops::sync_clipboard()) clear_cut();
 	was_focused = focused;
 	if (ops::take_refresh()) reload();
+	if (busy.poll()) update_busy();
 	poll_watch();
 	poll_archive();
 	int why;
@@ -1793,6 +1867,18 @@ fn void frame() => @pool()
 			}
 			int vi = i - parent_rows;
 			sys::Entry* entry = &entries[visible[vi]];
+			char bk = any_busy ? busy_kind[visible[vi]] : 0;
+			if (bk)
+			{
+				// Part of a running operation: no selection, menus, drags or opening; a pulsing marker instead.
+				if (clicked) { pressed_row = -1; ui::toast(string::tformat("%s: wait until it is done", busy_verb(bk)), ui::YELLOW); }
+				clicked = false;
+				activated = false;
+				if (ui::right_clicked(row)) row_menu = true;   // no menu (not the free-space one either)
+				if (hovered) ui::tooltip(busy_verb(bk));
+				draw_busy_row(row, entry, bk, visible[vi], icon_size, text_size, row_h);
+				continue;
+			}
 			if (marked[vi]) { ui::panel(row, ui::BG2, 4); }
 			else if (hovered) { ui::panel(row, ui::BG1, 4); }
 			if (selected == vi && (marked_count > 1 || !marked[vi])) ui::outline(row, ui::BG4, 4);
@@ -1903,6 +1989,7 @@ fn void frame() => @pool()
 		// Navigate after drawing: do not mutate the entry array during iteration.
 		if (go_up) { go_parent(); }
 		else if (multi_enter && launch_marked()) {}
+		else if (enter >= 0 && any_busy && busy_kind[enter]) { ui::toast(string::tformat("%s: wait until it is done", busy_verb(busy_kind[enter])), ui::YELLOW); }
 		else if (enter >= 0)
 		{
 			String name = txt::view(&entries[enter].name);
