@@ -1,0 +1,19 @@
+#!/bin/sh
+# Install this sms release for the current user: ~/.local/bin/sms, desktop launcher (opens your home folder),
+# icon, license notices. Same paths as scripts/install.py.
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+data=${XDG_DATA_HOME:-$HOME/.local/share}
+case $data in /*) ;; *) echo "XDG_DATA_HOME must be absolute" >&2; exit 1 ;; esac
+bin=$HOME/.local/bin
+mkdir -p "$bin" "$data/applications" "$data/icons/hicolor/scalable/apps" "$data/sms/licenses"
+# Replace the file (new inode) so reinstalling works while sms is running.
+cp "$here/sms" "$bin/.sms-new" && chmod 755 "$bin/.sms-new" && mv -f "$bin/.sms-new" "$bin/sms"
+cp "$here/licenses/FONT-OFL.txt" "$here/licenses/RAYLIB-LICENSE.txt" "$data/sms/licenses/"
+quote() { printf '%s' "$1" | sed 's/[\\"`$]/\\&/g; s/%/%%/g; s/|/\\|/g'; }
+sed "s|^Exec=.*|Exec=\"$(quote "$bin/sms")\" --dir \"$(quote "$HOME")\"|" "$here/sms.desktop" > "$data/applications/sms.desktop"
+cp "$here/sms.svg" "$data/icons/hicolor/scalable/apps/sms.svg"
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+[ -f "$data/icons/hicolor/icon-theme.cache" ] && command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t "$data/icons/hicolor" || true
+echo "Installed $bin/sms, $data/applications/sms.desktop and the icon."
+case ":$PATH:" in *":$bin:"*) ;; *) echo "Add ~/.local/bin to PATH to run sms from a terminal." ;; esac

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Remove what ./install put in place (other files in those folders are kept).
+set -eu
+data=${XDG_DATA_HOME:-$HOME/.local/share}
+rm -f "$HOME/.local/bin/sms" "$data/applications/sms.desktop" "$data/icons/hicolor/scalable/apps/sms.svg" \
+	"$data/sms/licenses/FONT-OFL.txt" "$data/sms/licenses/RAYLIB-LICENSE.txt"
+rmdir "$data/sms/licenses" "$data/sms" 2>/dev/null || true
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+[ -f "$data/icons/hicolor/icon-theme.cache" ] && command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t "$data/icons/hicolor" || true
+echo "Uninstalled sms (settings in ~/.config/sms are kept)."

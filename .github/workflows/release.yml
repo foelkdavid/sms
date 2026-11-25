@@ -1,0 +1,79 @@
+# Release build: Linux x86_64 (Wayland). Push a tag v* -> build, then publish a GitHub release with the archive.
+# Run by hand (Actions tab -> release -> Run workflow) or push a ci-* branch to build without publishing.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["ci-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  C3_VERSION: v0.8.6
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch bmu (submodule, SSH URL -> HTTPS)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init
+
+      - name: Version
+        run: echo "VERSION=$(python3 -c 'import json; print(json.load(open("project.json"))["version"])')" >> "$GITHUB_ENV"
+
+      - name: Toolchain and raylib (Wayland)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential pkg-config libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libegl-dev libgl-dev
+          curl -sL "https://github.com/c3lang/c3c/releases/download/${C3_VERSION}/c3-linux.tar.gz" | tar xz -C "$HOME"
+          echo "$HOME/c3" >> "$GITHUB_PATH"
+          bmu/dev/tools/build-raylib.sh
+
+      - name: Build and package
+        run: |
+          c3c build sms
+          d="sms-${VERSION}-linux-x64-wayland"
+          mkdir -p "$d"
+          cp build/sms "$d/"
+          cp README.md assets/sms.svg "$d/"
+          sed 's|@EXEC@|sms|' sms.desktop > "$d/sms.desktop"
+          cp -r licenses "$d/"
+          cp release/install release/uninstall "$d/"
+          tar czf "$d.tar.gz" "$d"
+          echo "PKG=$d.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: linux-x64-wayland
+          path: ${{ env.PKG }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            sms ${{ github.ref_name }}: show my stuff, a minimal, very fast file explorer for Wayland.
+
+            | Download | System |
+            |---|---|
+            | `sms-*-linux-x64-wayland.tar.gz` | Linux x86_64, Wayland session (no X11 / XWayland), OpenGL 3.3 |
+
+            Unpack, then `./install` (to `~/.local`: binary, launcher, icon) or `./uninstall`; no root needed.
+            Or run it in place: `./sms`.
+            Optional: `libarchive` (browse and extract archives), `sudo` (Retry as administrator).
+            Press Ctrl + K for all shortcuts.
