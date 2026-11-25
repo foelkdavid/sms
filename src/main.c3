@@ -38,7 +38,7 @@ int anchor = -1; // Shift range origin (visible index).
 int collapse_row = -1; // Plain press on a marked row: collapse to it on release unless dragged.
 int drag_dirs; // Marked folders carried by the current drag (saved as locations when dropped on the sidebar).
 char[4096] drop_target; // Folder under the mouse that accepts the current drag (empty = none); reset every frame.
-bool band_pending; // Press on empty list space or a row's left strip: a selection box starts once the mouse moves.
+bool band_pending; // Press on empty list space or left of the icons: a selection box starts once the mouse moves.
 bool banding;
 bool band_additive; // Ctrl held at start: the box adds to band_base instead of replacing.
 float band_x0;
@@ -1840,6 +1840,15 @@ fn void frame() => @pool()
 		scroll = ui::scroll_wheel(list, scroll, content);
 		update_band(list, row_h, parent_rows, content);
 		bool dim_cut = any_cut && ops::is_cut(txt::view(&directory));
+		// A press left of the icons (from the gap next to the sidebar) starts a selection box: full folders have no
+		// empty space for one. Taken before the rows see the press.
+		Rect band_zone = { list.x - 8, list.y, 8 + 12 * content_scale, list.height };
+		if (!shift && !arc::active && ui::clicked(band_zone))
+		{
+			ui::unfocus();
+			if (!ctrl) select_only(-1);
+			band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
+		}
 		ui::begin_clip(list);
 		// Virtualized list: visit only the rows that can actually be seen.
 		int first = math::max(0, (int)(scroll / row_h));
@@ -1943,17 +1952,7 @@ fn void frame() => @pool()
 			bool dim = dim_cut && cut_entry[visible[vi]];
 			ui::text(row_icon(entry), row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
 			ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, dim ? ui::GRAY : ui::FG);
-			// The strip left of the icon draws a selection box (full folders have no empty space for one).
-			Rect strip = { row.x, row.y, 11 * content_scale, row_h };
-			bool in_strip = !shift && ui::hover(strip);
-			if (in_strip && !dragging) ui::panel({ row.x + 2, row.y + 6, 3, row_h - 12 }, ui::BG3, 1);
-			if (clicked && in_strip)
-			{
-				collapse_row = -1;
-				if (!ctrl) select_only(-1);
-				band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
-			}
-			else if (clicked)
+			if (clicked)
 			{
 				collapse_row = -1;
 				if (shift)
@@ -1981,7 +1980,7 @@ fn void frame() => @pool()
 					select_only(vi);
 				}
 				drag_dirs = 0;
-				// The rest of the row drags (selection boxes: empty list space or the strip left of the icons).
+				// The whole row drags (selection boxes: empty list space, or a press left of the icons).
 				if (!ctrl && !shift && marked[vi])
 				{
 					// Counted once per press, never per frame.
