@@ -42,7 +42,7 @@ jobs:
           d="sms-${VERSION}-linux-x64-wayland"
           mkdir -p "$d"
           cp build/sms "$d/"
-          cp README.md assets/sms.svg "$d/"
+          cp README.md LICENSE assets/sms.svg "$d/"
           sed 's|@EXEC@|sms|' sms.desktop > "$d/sms.desktop"
           cp -r licenses "$d/"
           cp release/install release/uninstall "$d/"

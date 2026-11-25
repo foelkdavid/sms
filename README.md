@@ -60,3 +60,7 @@ Settings and saved locations live in `~/.config/sms/`.
 | [libarchive](https://www.libarchive.org) | archives, optional, loaded from the system when used | [BSD-2-Clause](https://github.com/libarchive/libarchive/blob/master/COPYING) |
 
 The font and raylib notices are in [`licenses/`](licenses/) and are installed with the app.
+
+## License
+
+sms is MIT-licensed (see [`LICENSE`](LICENSE)); the third-party parts keep their own licenses listed above.
