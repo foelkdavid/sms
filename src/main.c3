@@ -38,7 +38,7 @@ int anchor = -1; // Shift range origin (visible index).
 int collapse_row = -1; // Plain press on a marked row: collapse to it on release unless dragged.
 int drag_dirs; // Marked folders carried by the current drag (saved as locations when dropped on the sidebar).
 char[4096] drop_target; // Folder under the mouse that accepts the current drag (empty = none); reset every frame.
-bool band_pending; // Press on empty space / a row's blank area: a selection box starts once the mouse moves.
+bool band_pending; // Press on empty list space: a selection box starts once the mouse moves.
 bool banding;
 bool band_additive; // Ctrl held at start: the box adds to band_base instead of replacing.
 float band_x0;
@@ -1946,9 +1946,6 @@ fn void frame() => @pool()
 			if (clicked)
 			{
 				collapse_row = -1;
-				// Blank space right of the name starts a selection box instead of a file drag (measured on press only).
-				float name_end = row.x + 60 * content_scale + ui::text_w(txt::view(&entry.name), text_size) + 16 * content_scale;
-				bool blank = rl::get_mouse_position()[0] > name_end;
 				if (shift)
 				{
 					if (anchor < 0) anchor = selected >= 0 ? selected : vi;
@@ -1974,11 +1971,8 @@ fn void frame() => @pool()
 					select_only(vi);
 				}
 				drag_dirs = 0;
-				if (blank && !shift)
-				{
-					band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
-				}
-				else if (!ctrl && !shift && marked[vi])
+				// The whole row drags (a selection box starts on empty list space).
+				if (!ctrl && !shift && marked[vi])
 				{
 					// Counted once per press, never per frame.
 					for (int k = 0; k < visible_count; k++) if (marked[k] && entries[visible[k]].dir) drag_dirs++;
