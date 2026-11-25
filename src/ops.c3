@@ -703,6 +703,7 @@ fn void finished(Op* o, fileop::Progress* p) => @pool()
 	{
 		case DONE:
 			if (o.clears_clip) { clip.count = 0; clip_cut = false; }
+			if (!txt::empty(&p.error)) { ui::toast(txt::view(&p.error), ui::YELLOW); return; }   // an item could not be put back
 			switch (o.kind)
 			{
 				case COPY: ui::toast(string::tformat("Copied %s%s", what, skipped), ui::GREEN);
@@ -965,7 +966,28 @@ fn int shown_ops(Op*[] out)
 	return n;
 }
 
-fn float op_height(Op* o, int shown) => o.state == QUEUED ? QUEUED_H : PANEL_H + items_height(o, shown);
+fn float op_height(Op* o, int shown) => o.state == QUEUED ? QUEUED_H + queued_rows_height(o, shown) : PANEL_H + items_height(o, shown);
+
+fn float queued_rows_height(Op* o, int shown)
+{
+	if (!o.show_items || o.req.count < 2) return 0;
+	float rows = (float)math::min(o.req.count, shown > 1 ? 3 : ITEM_ROWS_MAX);
+	return rows * ITEM_ROW + 8;
+}
+
+<* Take item i out of a queued request (nothing was done with it yet); the last one removes the operation. *>
+fn void unqueue_item(Op* o, int i) => @pool()
+{
+	marks_dirty = true;
+	if (o.req.count <= 1) { o.state = FREE; return; }
+	String[] keep = mem::talloc_array(String, (usz)o.req.count - 1);
+	int n;
+	for (int k = 0; k < o.req.count; k++) if (k != i) keep[n++] = o.req.at(k).tcopy();   // copies: set() rewrites the buffer
+	String dir = txt::view(&o.req.dir).tcopy();
+	o.req.set(dir, keep[:n]);
+	o.items = n;
+	set_title(o, dir);
+}
 
 <* Height of the docked panels this frame (0 = none). *>
 fn float panel_height()
@@ -1001,18 +1023,29 @@ fn void draw_panel(Rect r)
 	{
 		float h = op_height(list[i], n);
 		Rect pr = { r.x, y, r.width, h };
-		if (list[i].state == QUEUED) { draw_queued(list[i], pr); }
+		if (list[i].state == QUEUED) { draw_queued(list[i], pr, n); }
 		else { draw_op(list[i], pr, n); }
 		y += h + PANEL_GAP;
 	}
 }
 
-<* A waiting operation: its title, why it waits, and ✕ to drop it from the queue. *>
-fn void draw_queued(Op* o, Rect r)
+<* A waiting operation: its title, why it waits, ✕ to drop it from the queue; a click lists its items (each with ✕). *>
+fn void draw_queued(Op* o, Rect r, int shown)
 {
 	ui::panel(r, ui::BG_HARD, 6);
 	ui::outline(r, ui::BG2, 6);
 	float x = r.x + 14;
+	bool items = o.req.count > 1;
+	Rect head = { r.x, r.y, r.width - 52, QUEUED_H };
+	if (items && ui::hover(head)) { ui::outline(r, ui::BG3, 6); ui::tooltip(o.show_items ? "Hide the items" : "Show each item"); }
+	if (items && ui::clicked(head))
+	{
+		o.show_items = !o.show_items;
+		show_items_default = o.show_items;
+		o.items_scroll = 0;
+	}
+	float rh = queued_rows_height(o, shown);
+	if (rh > 0) draw_queued_items(o, { x, r.y + QUEUED_H, r.width - 28, rh - 8 });
 	ui::text(ui::I_CLOCK, x, r.y + 14, 16, ui::GRAY);
 	ui::text_fit(txt::view(&o.title), x + 28, r.y + 7, r.width - 100, 15, ui::FG4);
 	ui::text_fit(prefs::operations == prefs::OPS_QUEUE ? "Waiting: starts when the earlier operations are done" : "Waiting: starts when the transfer on the same drive is done", x + 28, r.y + 26, r.width - 100, 12, ui::GRAY);
@@ -1021,6 +1054,27 @@ fn void draw_queued(Op* o, Rect r)
 		o.state = FREE;
 		marks_dirty = true;
 	}
+}
+
+fn void draw_queued_items(Op* o, Rect list) => @pool()
+{
+	ui::hline(list.x, list.y - 4, list.width, ui::BG2);
+	float content = (float)o.req.count * ITEM_ROW;
+	o.items_scroll = ui::scroll_wheel(list, o.items_scroll, content);
+	int first = (int)(o.items_scroll / ITEM_ROW);
+	int end = math::min(o.req.count, first + (int)(list.height / ITEM_ROW) + 2);
+	int remove = -1;
+	ui::begin_clip(list);
+	for (int i = first; i < end; i++)
+	{
+		float y = list.y + (float)i * ITEM_ROW - o.items_scroll;
+		ui::text(ui::I_CLOCK, list.x + 2, y + 5, 14, ui::BG3);
+		ui::text_fit(o.req.at(i), list.x + 24, y + 5, list.width - 70, 14, ui::FG4);
+		if (ui::icon_button({ list.x + list.width - 36, y + 1, 24, 24 }, ui::I_TIMES, ui::GRAY, "Leave this item out")) remove = i;
+	}
+	ui::end_clip();
+	ui::scrollbar(list, o.items_scroll, content);
+	if (remove >= 0) unqueue_item(o, remove);
 }
 
 <* A running operation: title, bar, speed / time left, its current item; a click lists each item. *>
@@ -1066,12 +1120,20 @@ fn void draw_op(Op* o, Rect r, int shown)
 	if (ih > 0) draw_items(o, { x, r.y + PANEL_H, w, ih - 8 });
 }
 
-<* Can this item still be left out (cancel_item)? COPY / MOVE until the commit; others only while it waits. *>
+<* Can this item be left out and restored (cancel_item)? Copy / move: any time while the operation runs; trash:
+   also once trashed (put back); delete / restore: only while it waits (deleted data cannot come back). *>
 fn bool can_drop(Op* o, fileop::ItemProgress* it)
 {
-	if (!o.cur.can_cancel || o.cur.state == FINISHING) return false;
-	if (it.state == SKIPPED || it.state == CANCELLED) return false;
-	return o.kind == COPY || o.kind == MOVE || it.state == WAITING;
+	fileop::State st = o.cur.state;
+	if (st == DONE || st == CANCELLED || st == FAILED || o.cur.error[0]) return false;
+	if (it.leaving || it.state == SKIPPED || it.state == CANCELLED) return false;
+	switch (o.kind)
+	{
+		case COPY:
+		case MOVE: return true;
+		case TRASH: return it.state == WAITING || it.state == DONE;
+		default: return it.state == WAITING;
+	}
 }
 
 <* The expanded panel: one row per item (icon, name, own bar, size, ✕), virtualized, following the active item. *>
@@ -1112,6 +1174,7 @@ fn void draw_items(Op* o, Rect list) => @pool()
 			case CANCELLED: icon = ui::I_TIMES; ic = ui::GRAY;
 			default: break;
 		}
+		if (it.leaving) { icon = ui::I_UNDO; ic = ui::YELLOW; }
 		ui::text(icon, list.x + 2, y + 5, 14, ic);
 		ui::text_fit(txt::view(&it.name), list.x + 24, y + 5, nw, 14, it.state == WAITING || it.state == CANCELLED ? ui::FG4 : ui::FG);
 		float f = it.bytes_total ? (float)it.bytes_done / (float)it.bytes_total : it.files_total ? (float)it.files_done / (float)it.files_total : 0;
@@ -1123,7 +1186,8 @@ fn void draw_items(Op* o, Rect list) => @pool()
 		}
 		char[32] a, b;
 		String size;
-		if (it.state == SKIPPED) { size = "skipped"; }
+		if (it.leaving) { size = it.state == WAITING ? "leaving out…" : "putting back…"; }
+		else if (it.state == SKIPPED) { size = "skipped"; }
 		else if (it.state == CANCELLED) { size = "left out"; }
 		else if (it.bytes_total && it.state == ACTIVE)
 		{
@@ -1134,9 +1198,9 @@ fn void draw_items(Op* o, Rect list) => @pool()
 		else if (it.bytes_total) { size_text(&a, it.bytes_total); size = txt::view(&a); }
 		else if (it.files_total > 1) { size = string::tformat("%d items", it.files_total); }
 		ui::text_fit(size, sx, y + 6, list.x + list.width - sx - xw - 8, 12, ui::GRAY);
-		if (can_drop(o, it) && ui::icon_button({ list.x + list.width - xw - 6, y + 1, 24, 24 }, ui::I_TIMES, ui::GRAY, it.state == DONE ? "Leave this item out (undo it)" : "Leave this item out"))
+		if (can_drop(o, it) && ui::icon_button({ list.x + list.width - xw - 6, y + 1, 24, 24 }, ui::I_TIMES, ui::GRAY, it.state == WAITING ? "Leave this item out" : "Leave this item out and put it back"))
 		{
-			if (!o.job.cancel_item(first + k)) ui::toast("Too late to leave it out", ui::YELLOW);
+			if (!o.job.cancel_item(first + k)) ui::toast("This item can't be put back any more", ui::YELLOW);
 		}
 	}
 	ui::end_clip();
