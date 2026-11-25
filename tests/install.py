@@ -1,5 +1,6 @@
 """Installation integration check; all user paths are temporary."""
 import os
+import pwd
 import shutil
 from pathlib import Path
 import subprocess
@@ -35,7 +36,8 @@ with tempfile.TemporaryDirectory(prefix="sms-install-") as temporary:
         running.terminate()
         running.wait()
     text = desktop.read_text()
-    assert '@EXEC@' not in text and '--dir' in text and '~' not in text
+    real_home = pwd.getpwuid(os.getuid()).pw_dir   # the launcher must use the test home, not the real one
+    assert '@EXEC@' not in text and '--dir' in text and real_home not in text
     for name in ('FONT-OFL.txt', 'RAYLIB-LICENSE.txt'):
         assert (data / 'sms/licenses' / name).read_bytes() == (ROOT / 'licenses' / name).read_bytes()
     unrelated = data / 'sms/keep'
