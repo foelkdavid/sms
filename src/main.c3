@@ -361,6 +361,14 @@ fn void read_only() => ui::toast("Archives are read-only: extract items first", 
 
 fn bool row_archive(sys::Entry* e) => archive::is_archive(txt::view(&e.name));
 
+<* Row icon: folder, disc image (.iso), archive, plain file. *>
+fn String row_icon(sys::Entry* e)
+{
+	if (e.dir) return ui::I_FOLDER;
+	if (txt::iends_with(txt::view(&e.name), ".iso")) return ui::I_DISC;
+	return row_archive(e) ? ui::I_FILE_ARCHIVE : ui::I_FILE;
+}
+
 <* Parent folder; leaving an archive's top level selects the archive in its folder. *>
 fn void go_parent() => @pool()
 {
@@ -1791,7 +1799,7 @@ fn void frame() => @pool()
 				ui::outline(row, ui::AQUA, 4, 2);
 			}
 			bool dim = dim_cut && cut_entry[visible[vi]];
-			ui::text(entry.dir ? ui::I_FOLDER : row_archive(entry) ? ui::I_FILE_ARCHIVE : ui::I_FILE, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
+			ui::text(row_icon(entry), row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, dim ? ui::BG4 : entry.dir ? ui::YELLOW : ui::GRAY);
 			ui::text_fit(txt::view(&entry.name), row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, math::max(0.0f, row.width - 72 * content_scale), text_size, dim ? ui::GRAY : ui::FG);
 			if (clicked)
 			{
