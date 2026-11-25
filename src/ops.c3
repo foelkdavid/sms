@@ -295,16 +295,9 @@ fn void extract(String archive_path, String inner, String[] names, String dst, b
 }
 
 // The system clipboard carries copied files between sms windows and other file managers
-// (x-special/gnome-copied-files, text/uri-list, plain paths). clip_hash remembers what sms itself last put there
-// (or, for an archive copy, what was there), so Ctrl+V knows whether the internal clip is still the current one.
-ulong clip_hash;
-
-fn ulong text_hash(String s)
-{
-	ulong h = 0xcbf29ce484222325;
-	foreach (c : s) { h ^= c; h *= 0x100000001b3; }
-	return h;
-}
+// (x-special/gnome-copied-files, text/uri-list, plain paths). The internal clip is current while sms still owns
+// the clipboard (ui::clipboard_owned: no IPC). The system clipboard is read only on Ctrl+V of someone else's copy:
+// a read waits on the owning app, so never on focus or per frame.
 
 <* "file:///dir/a\r\n…" for names in dir (temp). *>
 fn String uri_list(String dir, String[] names)
@@ -345,16 +338,13 @@ fn void publish_clipboard(String dir, String[] names, bool cut) => @pool()
 		plain.append(txt::join(dir, n));
 	}
 	ui::clipboard_set_data({ "x-special/gnome-copied-files", "text/uri-list", "text/plain;charset=utf-8" }, { g.str_view(), list, plain.str_view() });
-	clip_hash = text_hash(g.str_view());
 }
 
 <* The window got focus: when another window or app replaced the clipboard, forget the internal clip (and its
    dimmed cut entries). Returns true when it was dropped. *>
-fn bool sync_clipboard() => @pool()
+fn bool sync_clipboard()
 {
-	if (!clip.count) return false;
-	bool cut;
-	if (text_hash(system_files(&cut)) == clip_hash) return false;
+	if (!clip.count || ui::clipboard_owned()) return false;
 	clip.free();
 	clip_cut = false;
 	clip_archive = false;
@@ -376,8 +366,14 @@ fn void set_archive_clipboard(String archive_path, String inner, String[] names)
 {
 	if (!names.len) return;
 	if (!clip.set(archive_path, names)) { ui::toast("Too many items for the clipboard", ui::RED); return; }
-	bool cut;
-	clip_hash = text_hash(system_files(&cut));   // internal only: current while the system clipboard stays as it is
+	DString plain;   // entry paths as text, so the clipboard is ours (and pasting into a text field gives them)
+	plain.tinit();
+	foreach (i, n : names)
+	{
+		if (i) plain.append("\n");
+		plain.append(txt::join(txt::join(archive_path, inner), n));
+	}
+	ui::clipboard_set_data({ "text/plain;charset=utf-8" }, { plain.str_view() });
 	clip_cut = false;
 	clip_archive = true;
 	txt::set(&clip_inner, inner);
@@ -388,11 +384,10 @@ fn void set_archive_clipboard(String archive_path, String inner, String[] names)
    it is still the current one. Returns false when there is nothing to paste. *>
 fn bool paste(String dst) => @pool()
 {
-	bool cut;
-	String sys_files = system_files(&cut);
-	bool ours = clip.count && text_hash(sys_files) == clip_hash;
-	if (!ours)
+	if (!clip.count || !ui::clipboard_owned())
 	{
+		bool cut;
+		String sys_files = system_files(&cut);
 		if (!sys_files.len) return false;
 		paste_system(sys_files, cut, dst);
 		return true;
@@ -423,6 +418,9 @@ fn void paste_system(String list, bool cut, String dst) => @pool()
 	if (begin(cut ? MOVE : COPY, txt::view(&real), names[:n], dst) && cut)
 	{
 		ui::clipboard_set_data({ "text/plain;charset=utf-8" }, { "" });   // a cut is pasted once
+		clip.free();   // this "" is ours now: no older internal clip may count as current
+		clip_cut = false;
+		clip_archive = false;
 	}
 }
 
