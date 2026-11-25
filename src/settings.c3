@@ -10,7 +10,8 @@ int tab;
 float shortcuts_scroll;
 float rules_scroll;
 const float RULE_ROW = 44;
-ui::Shortcut[52] shortcuts = {
+const int ID_TERMINAL = 90;
+ui::Shortcut[54] shortcuts = {
 	{ "NAVIGATION", "", true },
 	{ "Up / Down", "Move selection (hold to repeat)", false },
 	{ "Enter", "Open selected folder, or open selected files", false },
@@ -59,6 +60,8 @@ ui::Shortcut[52] shortcuts = {
 	{ "Single click", "Select a file or folder", false },
 	{ "Double click", "Open a file or folder", false },
 	{ "Right click a file", "Open, or open as sudo (asks for the password); archives: extract", false },
+	{ "Right click a folder", "Open, or open it in the terminal (set in General)", false },
+	{ "Right click free space", "Open terminal here (in the shown folder)", false },
 	{ "Click ../", "Go to parent folder", false },
 	{ "Drag onto ../ or a place", "Move there; hold Ctrl to copy", false },
 	{ "Drag onto sidebar", "Drop folders on empty sidebar space to save them", false },
@@ -119,6 +122,9 @@ fn void draw()
 		bool dl = places::downloads;
 		if (ui::checkbox(x + 4, area.y + 160, "Show Downloads in the sidebar", &dl)) places::set_downloads(dl);
 		ui::text_fit("The sidebar (Downloads, Trash, saved locations) is shared with the file pickers of other bmu apps.", x + 4, area.y + 196, width - 8, 14, ui::FG4);
+		ui::label(x + 4, area.y + 240, "TERMINAL");
+		if (ui::input(ID_TERMINAL, { x + 4, area.y + 260, width - 8, 36 }, &prefs::terminal, "foot   (or: alacritty, kitty, wezterm start)", null, ui::I_TERMINAL)) prefs::dirty = true;
+		ui::text_fit("Right-click a folder or free list space: Open terminal here. Command + arguments, no shell; it starts in that folder.", x + 4, area.y + 304, width - 8, 14, ui::FG4);
 	}
 	else
 	{

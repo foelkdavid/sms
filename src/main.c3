@@ -52,7 +52,10 @@ char[4096] trash_files; // $XDG_DATA_HOME/Trash/files, resolved once at startup.
 bool drop_trash; // The current drag is over the sidebar's Trash row; reset every frame.
 Rect path_field; // the path bar, for drawing its completions on top of everything
 const int MENU_FILE = 1;
+const int MENU_DIR = 2; // folder row or free list space: Open / Open terminal here
 int menu_entry = -1; // entry the file context menu is for
+char[4096] menu_dir; // folder the folder menu is for (a folder row, or the shown folder)
+bool menu_dir_row; // the folder menu came from a folder row (offers Open)
 const int PICK_EXTRACT = 1;
 const String ARCHIVE_LABEL = "Archive (read-only)";
 float archive_label_w; // measured once (UI scale changes keep logical widths)
@@ -1007,6 +1010,16 @@ fn void file_menu() => @pool()
 	ui::menu_end();
 }
 
+<* Right-click menu for a folder row or free list space: open it, or open a terminal there. *>
+fn void dir_menu()
+{
+	if (!ui::menu_begin(MENU_DIR, 250)) return;
+	String path = txt::view(&menu_dir);
+	if (menu_dir_row && ui::menu_item("Open", ui::I_FOLDER_OPEN, "Enter")) go(path);
+	if (ui::menu_item(menu_dir_row ? "Open in terminal" : "Open terminal here", ui::I_TERMINAL, "")) openers::open_terminal(path);
+	ui::menu_end();
+}
+
 <* "deleted from ~/Docs on 2026-11-23 14:02" for a trash entry; reads its .trashinfo only when the hovered entry changes. *>
 fn String trash_origin(int entry) => @pool()
 {
@@ -1523,6 +1536,7 @@ fn void frame() => @pool()
 		// Virtualized list: visit only the rows that can actually be seen.
 		int first = math::max(0, (int)(scroll / row_h));
 		int end = math::min(row_count, first + (int)(list.height / row_h) + 2);
+		bool row_menu;
 		for (int i = first; i < end; i++)
 		{
 			Rect row = { list.x, list.y + (float)i * row_h - scroll, list.width - 10, row_h };
@@ -1556,6 +1570,13 @@ fn void frame() => @pool()
 				ui::text(ui::I_FOLDER, row.x + 12 * content_scale, row.y + (row_h - icon_size) / 2, icon_size, ui::BG4);
 				ui::text("../", row.x + 60 * content_scale, row.y + (row_h - text_size) / 2, text_size, ui::FG);
 				if (clicked) { select_only(-2); go_up = true; }
+				if (!arc::active && ui::right_clicked(row))
+				{
+					txt::set(&menu_dir, txt::dirname(txt::view(&directory)));
+					menu_dir_row = true;
+					ui::menu_open(MENU_DIR);
+					row_menu = true;
+				}
 				continue;
 			}
 			int vi = i - parent_rows;
@@ -1570,6 +1591,16 @@ fn void frame() => @pool()
 				if (!marked[vi]) select_only(vi);
 				menu_entry = visible[vi];
 				ui::menu_open(MENU_FILE);
+				row_menu = true;
+			}
+			// Right-click on a folder: Open / Open in terminal.
+			else if (entry.dir && ui::right_clicked(row))
+			{
+				if (!marked[vi]) select_only(vi);
+				txt::set(&menu_dir, txt::join(txt::view(&directory), txt::view(&entry.name)));
+				menu_dir_row = true;
+				ui::menu_open(MENU_DIR);
+				row_menu = true;
 			}
 			bool drop_here = dragging && hovered && entry.dir && !marked[vi] && !arc::active;
 			if (drop_here)
@@ -1636,6 +1667,13 @@ fn void frame() => @pool()
 			if (!ctrl && !shift) select_only(-1);
 			band_start(rl::get_mouse_position()[0], rl::get_mouse_position()[1] - list.y + scroll);
 		}
+		// Right-click on free list space: a terminal in the shown folder (not inside an archive: no real folder).
+		if (!row_menu && !arc::active && ui::right_clicked(list))
+		{
+			txt::set(&menu_dir, txt::view(&directory));
+			menu_dir_row = false;
+			ui::menu_open(MENU_DIR);
+		}
 		draw_band(list);
 		ui::end_clip();
 		ui::scrollbar(list, scroll, content);
@@ -1676,6 +1714,7 @@ fn void frame() => @pool()
 	if (rl::is_mouse_button_released(rl::RLMouseButton.LEFT) || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) { pressed_row = -1; collapse_row = -1; }
 	if (!searching && ui::focused(ID_PATH)) complete::draw(path_field);
 	file_menu();
+	dir_menu();
 	settings::draw();
 	ops::draw_dialogs();
 	if (picker::open)

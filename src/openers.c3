@@ -15,6 +15,7 @@ int count;
 char[MAX_DATA] data;
 char[120] error;
 int[16] children;
+bool[16] terminal_child; // a terminal's own exit status is the user's business; only 126/127 (no folder / no program) count
 int active_children;
 extern fn CInt fnmatch(ZString pattern, ZString name, CInt flags) @cname("fnmatch");
 
@@ -181,6 +182,36 @@ fn bool matches(String patterns, String name)
 	return false;
 }
 
+<*
+ Start the configured terminal (`prefs::terminal`, split like an opener command, no shell) with `dir` as its
+ working directory. Everything is prepared before fork; the child only changes directory and execs.
+*>
+fn bool open_terminal(String dir) => @pool()
+{
+	if (txt::empty(&prefs::terminal)) { ui::toast("No terminal configured. Set one in Ctrl+K → General.", ui::RED); return false; }
+	int slot = -1;
+	for (int i = 0; i < children.len; i++) if (!children[i]) { slot = i; break; }
+	if (slot < 0) { ui::toast("All 16 opener process slots are busy", ui::RED); return false; }
+	char[1024] storage;
+	ZString[MAX_COMMAND_ARGS + 1] argv;
+	int argc = split_command(txt::view(&prefs::terminal), &storage, argv[:MAX_COMMAND_ARGS]);
+	if (argc < 0) { ui::toast("The terminal command is empty or has an unclosed quote", ui::RED); return false; }
+	argv[argc] = null;
+	ZString cwd = dir.zstr_tcopy();
+	int pid = sys::c_fork();
+	if (pid < 0) { ui::toast("Could not start the terminal", ui::RED); return false; }
+	if (pid == 0)
+	{
+		if (sys::c_chdir(cwd) != 0) sys::c_exit(126);
+		sys::c_execvpe(argv[0], &argv[0], sys::environ);
+		sys::c_exit(127);
+	}
+	children[slot] = pid;
+	terminal_child[slot] = true;
+	active_children++;
+	return true;
+}
+
 // Explicit activation only. Prepare arguments before fork; never invoke a shell or wait synchronously.
 const int MAX_ARGS = 256; // files per opener process (more are split into further launches)
 
@@ -213,6 +244,7 @@ fn bool spawn(int rule, ZString[] files) => @pool()
 		sys::c_exit(127);
 	}
 	children[slot] = pid;
+	terminal_child[slot] = false;
 	active_children++;
 	return true;
 }
@@ -270,7 +302,13 @@ fn void poll()
 		{
 			children[i] = 0;
 			active_children--;
-			if (status != 0) ui::toast("File opener failed (check executable in Ctrl+K)", ui::RED);
+			if (terminal_child[i])
+			{
+				int code = (status >> 8) & 0xff;
+				if ((status & 0x7f) == 0 && code == 127) ui::toast("Terminal command not found (Ctrl+K → General)", ui::RED);
+				if ((status & 0x7f) == 0 && code == 126) ui::toast("Could not enter the folder for the terminal", ui::RED);
+			}
+			else if (status != 0) { ui::toast("File opener failed (check executable in Ctrl+K)", ui::RED); }
 		}
 	}
 }
