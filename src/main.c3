@@ -2,7 +2,7 @@ module sms;
 import std::math, std::core::string, std::io, libc;
 import raylib6::rl;
 import bmu::ui, bmu::txt, bmu::sys, bmu::fileop, bmu::find, bmu::archive, bmu::picker, bmu::places;
-import sms::prefs, sms::preview, sms::settings, sms::openers, sms::ops, sms::complete, sms::arc;
+import sms::prefs, sms::preview, sms::settings, sms::openers, sms::openwith, sms::ops, sms::complete, sms::arc;
 
 const int ID_PATH = 1;
 const int ID_SEARCH = 2;
@@ -199,10 +199,12 @@ fn int main(String[] args)
 	sync_places();
 	resolve_trash();
 	openers::load();
+	openwith::load();
 	defer { if (!prefs::save()) io::eprintfn("sms: could not save settings"); }
 	if (!navigate(start)) { io::eprintfn("sms: cannot read folder: %s", start); return 1; }
 	ui::open("sms", 900, 640, 480, 320, (float)prefs::ui_percent / 100);
 	ui::zoom_shift_only = true;
+	ui::load_font(&openwith::ICON_CODEPOINTS); // the program icons of "Open with" entries
 	defer ui::close();
 	defer preview::close();
 	defer arc::cleanup(); // after ops::close: no extraction into the temporary folder is running
@@ -1000,6 +1002,7 @@ fn void file_menu() => @pool()
 	}
 	if (ui::menu_item("Open", ui::I_EXTERNAL, "Enter", valid)) openers::launch(path);
 	if (ui::menu_item("Open as sudo", ui::I_LOCK, "", valid)) ops::ask_open_as_sudo(path);
+	if (valid) openwith::menu_items(txt::view(&directory), menu_names());
 	if (valid && archive::is_archive(name))
 	{
 		ui::menu_sep();
@@ -1017,6 +1020,7 @@ fn void dir_menu()
 	String path = txt::view(&menu_dir);
 	if (menu_dir_row && ui::menu_item("Open", ui::I_FOLDER_OPEN, "Enter")) go(path);
 	if (ui::menu_item(menu_dir_row ? "Open in terminal" : "Open terminal here", ui::I_TERMINAL, "")) openers::open_terminal(path);
+	openwith::menu_items(path, {});
 	ui::menu_end();
 }
 

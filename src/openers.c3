@@ -15,7 +15,10 @@ int count;
 char[MAX_DATA] data;
 char[120] error;
 int[16] children;
-bool[16] terminal_child; // a terminal's own exit status is the user's business; only 126/127 (no folder / no program) count
+// What each child is: an opener (any non-zero exit is reported), a terminal or an "Open with" target (their own exit
+// status is the user's business; only 126/127 = no folder / no program count).
+enum Kind : char { OPENER, TERMINAL, OPEN_WITH }
+Kind[16] child_kind;
 int active_children;
 extern fn CInt fnmatch(ZString pattern, ZString name, CInt flags) @cname("fnmatch");
 
@@ -189,25 +192,37 @@ fn bool matches(String patterns, String name)
 fn bool open_terminal(String dir) => @pool()
 {
 	if (txt::empty(&prefs::terminal)) { ui::toast("No terminal configured. Set one in Ctrl+K → General.", ui::RED); return false; }
+	return run(txt::view(&prefs::terminal), {}, dir, TERMINAL);
+}
+
+<*
+ Start `command` (split without a shell) with `files` appended as literal arguments, in working directory `cwd`
+ ("" = sms's own). Everything is prepared before fork; the child only changes directory and execs.
+*>
+fn bool run(String command, ZString[] files, String cwd, Kind kind) => @pool()
+{
 	int slot = -1;
 	for (int i = 0; i < children.len; i++) if (!children[i]) { slot = i; break; }
 	if (slot < 0) { ui::toast("All 16 opener process slots are busy", ui::RED); return false; }
 	char[1024] storage;
-	ZString[MAX_COMMAND_ARGS + 1] argv;
-	int argc = split_command(txt::view(&prefs::terminal), &storage, argv[:MAX_COMMAND_ARGS]);
-	if (argc < 0) { ui::toast("The terminal command is empty or has an unclosed quote", ui::RED); return false; }
-	argv[argc] = null;
-	ZString cwd = dir.zstr_tcopy();
+	ZString[MAX_COMMAND_ARGS] tokens;
+	int argc = split_command(command, &storage, &tokens);
+	if (argc < 0) { ui::toast("The command is empty or has an unclosed quote", ui::RED); return false; }
+	ZString[] argv = mem::talloc_array(ZString, (usz)argc + files.len + 1);
+	for (int i = 0; i < argc; i++) argv[i] = tokens[i];
+	foreach (usz i, f : files) argv[(usz)argc + i] = f;
+	argv[(usz)argc + files.len] = null;
+	ZString dir = cwd.len ? cwd.zstr_tcopy() : null;
 	int pid = sys::c_fork();
-	if (pid < 0) { ui::toast("Could not start the terminal", ui::RED); return false; }
+	if (pid < 0) { ui::toast("Could not start the program", ui::RED); return false; }
 	if (pid == 0)
 	{
-		if (sys::c_chdir(cwd) != 0) sys::c_exit(126);
+		if (dir && sys::c_chdir(dir) != 0) sys::c_exit(126);
 		sys::c_execvpe(argv[0], &argv[0], sys::environ);
 		sys::c_exit(127);
 	}
 	children[slot] = pid;
-	terminal_child[slot] = true;
+	child_kind[slot] = kind;
 	active_children++;
 	return true;
 }
@@ -221,33 +236,8 @@ fn int rule_for(String name)
 	return -1;
 }
 
-<* Start `rule`'s executable with `files` as literal arguments (no shell). Arguments are prepared before fork. *>
-fn bool spawn(int rule, ZString[] files) => @pool()
-{
-	int slot = -1;
-	for (int i = 0; i < children.len; i++) if (!children[i]) { slot = i; break; }
-	if (slot < 0) { ui::toast("All 16 opener process slots are busy", ui::RED); return false; }
-	// Program and its arguments from the rule (no shell); the files follow as literal arguments.
-	char[1024] storage;
-	ZString[MAX_COMMAND_ARGS] command;
-	int argc = split_command(txt::view(&rules[rule].executable), &storage, &command);
-	if (argc < 0) { ui::toast("This opener's command is empty or has an unclosed quote", ui::RED); return false; }
-	ZString[] argv = mem::talloc_array(ZString, (usz)argc + files.len + 1);
-	for (int i = 0; i < argc; i++) argv[i] = command[i];
-	foreach (usz i, f : files) argv[(usz)argc + i] = f;
-	argv[(usz)argc + files.len] = null;
-	int pid = sys::c_fork();
-	if (pid < 0) { ui::toast("Could not launch file opener", ui::RED); return false; }
-	if (pid == 0)
-	{
-		sys::c_execvpe(argv[0], &argv[0], sys::environ);
-		sys::c_exit(127);
-	}
-	children[slot] = pid;
-	terminal_child[slot] = false;
-	active_children++;
-	return true;
-}
+<* Start `rule`'s executable with `files` as literal arguments (no shell). *>
+fn bool spawn(int rule, ZString[] files) => run(txt::view(&rules[rule].executable), files, "", OPENER);
 
 // Explicit activation only. Prepare arguments before fork; never invoke a shell or wait synchronously.
 fn bool launch(String path) => @pool()
@@ -302,11 +292,17 @@ fn void poll()
 		{
 			children[i] = 0;
 			active_children--;
-			if (terminal_child[i])
+			int code = (status >> 8) & 0xff;
+			bool exited = (status & 0x7f) == 0;
+			if (child_kind[i] == TERMINAL)
 			{
-				int code = (status >> 8) & 0xff;
-				if ((status & 0x7f) == 0 && code == 127) ui::toast("Terminal command not found (Ctrl+K → General)", ui::RED);
-				if ((status & 0x7f) == 0 && code == 126) ui::toast("Could not enter the folder for the terminal", ui::RED);
+				if (exited && code == 127) ui::toast("Terminal command not found (Ctrl+K → General)", ui::RED);
+				if (exited && code == 126) ui::toast("Could not enter the folder for the terminal", ui::RED);
+			}
+			else if (child_kind[i] == OPEN_WITH)
+			{
+				if (exited && code == 127) ui::toast("Open with: program not found (Ctrl+K → Open with)", ui::RED);
+				if (exited && code == 126) ui::toast("Open with: could not enter the folder", ui::RED);
 			}
 			else if (status != 0) { ui::toast("File opener failed (check executable in Ctrl+K)", ui::RED); }
 		}
