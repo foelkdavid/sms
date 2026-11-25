@@ -198,6 +198,8 @@ fn int main(String[] args)
 	// Root helper for "Retry as administrator": nothing else of sms runs as root.
 	if (fileop::is_helper(args)) return fileop::helper_main(args);
 	String start = ".";
+	bool fallback_home; // --fallback-home: no folder given -> the home folder (desktop launcher: Exec=sms --fallback-home %f)
+	bool start_given;
 	for (usz i = 1; i < args.len; i++)
 	{
 		switch (args[i])
@@ -205,26 +207,42 @@ fn int main(String[] args)
 			case "--dir": case "-d":
 				if (++i >= args.len) { io::eprintfn("sms: --dir / -d needs a folder"); return 2; }
 				start = args[i];
+				start_given = true;
+			case "--fallback-home": fallback_home = true;
 			case "--shot": case "--frames": case "--scale":
 				if (++i >= args.len) { io::eprintfn("sms: missing option value"); return 2; }
 			case "--help": case "-h":
-				io::printn("Usage: sms [--dir PATH | -d PATH]\nDefaults to the working directory. Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nArchives (zip, tar, 7z, rar, ...) open in sms unless an opener matches; right-click an archive: Browse, Extract here, Extract to.... Inside an archive (read-only) double-click opens a temporary copy.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel; works across sms windows and file managers); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies), also into another sms window; middle-click a folder: open it in a new window.\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace or -: parent; F5: re-read (changes show up by themselves); Ctrl+N / Ctrl+Shift+N: new folder / file; Shift+right-click: open as sudo.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
+				io::printn("Usage: sms [FOLDER | FILE | --dir FOLDER]\nOpens FOLDER (a FILE: its folder, with the file selected; file:// URIs work too); defaults to the working directory (with --fallback-home: the home folder). Double-click or press Enter to open selected folders/files. Ctrl+K configures file openers.\nArchives (zip, tar, 7z, rar, ...) open in sms unless an opener matches; right-click an archive: Browse, Extract here, Extract to.... Inside an archive (read-only) double-click opens a temporary copy.\nClick selects; Ctrl+click toggles; Shift+click / Shift+Up/Down select a range; drag on empty space draws a selection box; Ctrl+A selects all; Escape or a click on empty space clears.\nCtrl+C / Ctrl+X / Ctrl+V: copy / cut / paste (with progress and cancel; works across sms windows and file managers); Delete: trash (Shift+Delete: permanent); drag onto a folder moves (Ctrl copies), also into another sms window; middle-click a folder: open it in a new window.\nCtrl+L: edit path; Ctrl+F: search current folder (Escape clears); Ctrl+Shift+F: search all subfolders; S: size selected folders; Ctrl+H: toggle hidden files; Ctrl+S: toggle sidebar; Ctrl+K: settings; Backspace or -: parent; F5: re-read (changes show up by themselves); Ctrl+N / Ctrl+Shift+N: new folder / file; Shift+right-click: open as sudo.\nCtrl +/-/0: content zoom; Ctrl+Shift +/-/0: UI zoom (both remembered).");
 				return 0;
 			default:
-				io::eprintfn("sms: unknown option: %s", args[i]); return 2;
+				if (args[i].starts_with("-")) { io::eprintfn("sms: unknown option: %s", args[i]); return 2; }
+				// A folder (or file) to open, e.g. from the desktop launcher's %f / xdg-open; a file:// URI works too.
+				start = args[i].starts_with("file://") ? txt::uri_path(args[i]) : args[i];
+				start_given = true;
 		}
 	}
+	if (fallback_home && !start_given) start = sys::home();
 	prefs::load();
 	sync_places();
 	resolve_trash();
 	openers::load();
 	openwith::load();
 	defer { if (!prefs::save()) io::eprintfn("sms: could not save settings"); }
+	char[4096] start_file;
+	String select_name = "";
+	if (sys::is_file(start))
+	{
+		// Keep the resolved name alive until the initial selection is applied.
+		sys::realpath(&start_file, start);
+		select_name = txt::basename(txt::view(&start_file));
+		start = txt::dirname(txt::view(&start_file));
+	}
 	if (!navigate(start)) { io::eprintfn("sms: cannot read folder: %s", start); return 1; }
 	ui::open("sms", 900, 640, 480, 320, (float)prefs::ui_percent / 100);
 	ui::zoom_shift_only = true;
 	ops::running.open();
 	update_busy();
+	if (select_name.len) for (int vi = 0; vi < visible_count; vi++) if (txt::view(&entries[visible[vi]].name) == select_name) { select_only(vi); break; }
 	ui::load_font(&openwith::ICON_CODEPOINTS); // the program icons of "Open with" entries
 	defer ui::close();
 	defer preview::close();

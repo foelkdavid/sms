@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Per-user installation; no settings or saved locations are touched."""
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,7 +17,11 @@ def desktop_string(value):
 
 def exec_arg(value):
     # Exec has its own quoting layer in addition to desktop-string escaping.
-    value = str(value).replace("%", "%%")
+    value = str(value)
+    # xdg-open's generic fallback cannot parse a quoted executable, even a simple one.
+    if re.fullmatch(r"[A-Za-z0-9_./-]+", value):
+        return value
+    value = value.replace("%", "%%")
     for char in ('\\', '"', '`', '$'):
         value = value.replace(char, '\\' + char)
     return desktop_string('"' + value + '"')
@@ -74,7 +79,8 @@ def main():
         shutil.copyfile(ROOT / "licenses" / name, destination)
         destination.chmod(0o644)
     template = (ROOT / "sms.desktop").read_text()
-    desktop.write_text(template.replace("@EXEC@", exec_arg(binary) + " --dir " + exec_arg(home)))
+    # No folder given (the launcher): home; a folder from xdg-open / a file manager: that folder.
+    desktop.write_text(template.replace("@EXEC@", exec_arg(binary) + " --fallback-home %f"))
     desktop.chmod(0o644)
     icon.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / "assets/sms.svg", icon)

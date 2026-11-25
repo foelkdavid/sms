@@ -7,4 +7,5 @@ Icon=sms
 StartupWMClass=sms
 Terminal=false
 Categories=System;FileTools;FileManager;
+MimeType=inode/directory;
 StartupNotify=false

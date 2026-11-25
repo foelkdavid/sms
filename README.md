@@ -39,7 +39,12 @@ c3c build install --trust=full
 ```
 
 This installs `~/.local/bin/sms`, a desktop launcher and the icon (no sudo). Make sure `~/.local/bin` is on your
-`PATH`, then run `sms` or `sms --dir ~/Downloads`.
+`PATH`, then run `sms` or `sms ~/Downloads`. The desktop launcher opens Home; a folder passed by another
+program opens that folder instead. To use sms as your default file manager:
+
+```sh
+xdg-mime default sms.desktop inode/directory
+```
 
 ```sh
 git pull --recurse-submodules && c3c build install --trust=full   # update
