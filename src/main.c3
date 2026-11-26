@@ -1253,6 +1253,7 @@ fn void file_menu() => @pool()
 		if (ui::menu_item("Extract here", ui::I_FILE_ARCHIVE, "", idle)) ops::extract(path, "", {}, txt::view(&directory), true);
 		if (ui::menu_item("Extract to…", ui::I_FOLDER, "", idle)) ask_extract_to(path, "", {});
 	}
+	rename_item(valid);
 	delete_items(valid, false);
 	new_items();
 	ui::menu_end();
@@ -1269,6 +1270,32 @@ fn void delete_items(bool valid, bool permanent)
 	{
 		ops::remove(txt::view(&directory), menu_names(), forever);
 	}
+}
+
+<* "Rename" (F2) for the right-clicked row; only when it is the whole selection (one item). *>
+fn void rename_item(bool valid)
+{
+	if (!valid || deep) return;
+	ui::menu_sep();
+	if (ui::menu_item("Rename", ui::I_EDIT, "F2", menu_names().len == 1)) ask_rename(menu_entry);
+}
+
+<* F2: rename the one selected item. *>
+fn void rename_selected()
+{
+	if (arc::active) { read_only(); return; }
+	if (deep) { ui::toast("Renaming isn't available in the results of all subfolders", ui::YELLOW); return; }
+	if (marked_count != 1) { ui::toast(marked_count ? "Select a single item to rename it" : "Select an item to rename it", ui::YELLOW); return; }
+	for (int i = 0; i < visible_count; i++) if (marked[i]) { ask_rename(visible[i]); return; }
+}
+
+fn void ask_rename(int entry)
+{
+	if (entry < 0 || entry >= entry_count) return;
+	if (arc::active) { read_only(); return; }
+	if (txt::view(&directory) == txt::view(&trash_files)) { ui::toast("Items in the trash can't be renamed: restore them first", ui::YELLOW); return; }
+	for (int i = 0; i < visible_count; i++) if (visible[i] == entry && is_busy(i)) { ui::toast("It is part of a file operation: wait until it is done", ui::YELLOW); return; }
+	ops::ask_rename(txt::view(&directory), txt::view(&entries[entry].name), entries[entry].dir);
 }
 
 <* "New folder" / "New file" (in the shown folder) at the end of a menu. *>
@@ -1307,6 +1334,7 @@ fn void dir_menu() => @pool()
 	if (ui::menu_item("Open in new window", ui::I_EXTERNAL, menu_dir_row ? "Middle-click" : "")) openers::open_window(path);
 	if (ui::menu_item(menu_dir_row ? "Open in terminal" : "Open terminal here", ui::I_TERMINAL, "")) openers::open_terminal(path);
 	openwith::menu_items(path, {});
+	rename_item(menu_entry >= 0 && menu_entry < entry_count);
 	delete_items(menu_entry >= 0 && menu_entry < entry_count, false);
 	if (!menu_dir_place) new_items();
 	ui::menu_end();
@@ -1644,6 +1672,7 @@ fn void frame() => @pool()
 			else { refilter(); }
 		}
 		if (ui::ctrl_down() && ui::letter('n')) ask_new(!ui::shift_down());
+		if (rl::is_key_pressed(rl::RLKeyboardKey.F2)) rename_selected();
 		if (ui::ctrl_down() && ui::letter('s'))
 		{
 			prefs::sidebar = !prefs::sidebar;

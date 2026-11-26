@@ -105,13 +105,16 @@ char[256] admin_pw;            // wiped on submit / cancel / close
 char[512] admin_error;
 const int ID_ADMIN_PW = 50;
 bool confirm_open;
-// New folder / new file (Ctrl+N, Ctrl+Shift+N, right-click): one name dialog, created in new_dir on the UI thread (one syscall).
+// New folder / new file (Ctrl+N, Ctrl+Shift+N, right-click) and Rename (F2, right-click): one name dialog, the item is
+// created or renamed in new_dir on the UI thread (one syscall).
 bool new_open;
 bool new_folder;
+bool new_rename;               // the dialog renames rename_from (a folder when new_folder)
+char[256] rename_from;
 char[256] new_name;
 char[4096] new_dir;
 char[160] new_error;
-char[256] created;             // the item just created, for the list to select after its reload ("" = none)
+char[256] created;             // the item just created or renamed, for the list to select after its reload ("" = none)
 const int ID_NEW_NAME = 51;
 bool pending_empty;             // the confirmation empties the whole trash
 bool pending_fallback;         // TRASH with permanent fallback for items on other drives
@@ -243,21 +246,40 @@ fn void ask_new(String dir, bool folder)
 {
 	txt::set(&new_dir, dir);
 	new_folder = folder;
+	new_rename = false;
 	new_name[0] = 0;
 	new_error[0] = 0;
 	new_open = true;
 	ui::focus_on(ID_NEW_NAME, &new_name);
 }
 
-<* Create the asked-for item; false (with new_error set) keeps the dialog open. *>
+<* Ask for a new name of `name` in `dir`; the name without its extension is preselected (files only). *>
+fn void ask_rename(String dir, String name, bool folder)
+{
+	txt::set(&new_dir, dir);
+	new_folder = folder;
+	new_rename = true;
+	txt::set(&rename_from, name);
+	txt::set(&new_name, name);
+	new_error[0] = 0;
+	new_open = true;
+	sz stem = -1;
+	if (!folder) if (try dot = name.rindex_of_char('.')) if (dot > 0) stem = (sz)dot;
+	ui::focus_on(ID_NEW_NAME, &new_name, stem);
+}
+
+<* Create (or rename to) the asked-for name; false (with new_error set) keeps the dialog open. *>
 fn bool create_new() => @pool()
 {
 	String name = txt::view(&new_name).trim();
 	if (!name.len) { txt::set(&new_error, "Enter a name"); return false; }
 	if (name == "." || name == ".." || name.contains("/")) { txt::set(&new_error, "A name can't be . or .. or contain /"); return false; }
+	String from = txt::view(&rename_from);
+	if (new_rename && name == from) return true;
 	ZString path = txt::join(txt::view(&new_dir), name).zstr_tcopy();
 	bool ok;
-	if (new_folder) { ok = sys::c_mkdir(path, 0o777) == 0; }
+	if (new_rename) { ok = sys::move_noreplace_z(txt::join(txt::view(&new_dir), from).zstr_tcopy(), path); }
+	else if (new_folder) { ok = sys::c_mkdir(path, 0o777) == 0; }
 	else
 	{
 		CInt fd = sys::c_open(path, sys::O_WRONLY | sys::O_CREAT | O_EXCL, 0o666);
@@ -267,7 +289,8 @@ fn bool create_new() => @pool()
 	if (!ok)
 	{
 		int e = (int)libc::errno();
-		txt::set(&new_error, e == 17 ? "Something with this name already exists" : e == 13 || e == 1 ? "Permission denied" : e == 30 ? "Read-only file system" : "Could not create it");
+		txt::set(&new_error, e == 17 ? "Something with this name already exists" : e == 13 || e == 1 ? "Permission denied" : e == 30 ? "Read-only file system"
+			: e == 2 ? "It no longer exists" : e == 16 ? "It is in use (a mount point?)" : new_rename ? "Could not rename it" : "Could not create it");
 		return false;
 	}
 	txt::set(&created, name);
@@ -1323,14 +1346,16 @@ fn void draw_dialogs() => @pool()
 	else if (new_open)
 	{
 		Rect box = ui::dialog(520, 240);
-		bool cancel = ui::dialog_header(box, new_folder ? ui::I_FOLDER : ui::I_FILE, new_folder ? "New folder" : "New file") || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
+		String title = new_rename ? (new_folder ? "Rename folder" : "Rename file") : new_folder ? "New folder" : "New file";
+		bool cancel = ui::dialog_header(box, new_rename ? ui::I_EDIT : new_folder ? ui::I_FOLDER : ui::I_FILE, title) || rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE);
 		String dir = txt::view(&new_dir);
-		ui::text_fit(string::tformat("in %s", dir == "/" ? "/" : txt::basename(dir)), box.x + 20, box.y + 60, box.width - 40, 14, ui::FG4);
+		String place = dir == "/" ? "/" : txt::basename(dir);
+		ui::text_fit(new_rename ? string::tformat("\"%s\" in %s", txt::view(&rename_from), place) : string::tformat("in %s", place), box.x + 20, box.y + 60, box.width - 40, 14, ui::FG4);
 		bool submitted;
 		if (ui::input(ID_NEW_NAME, { box.x + 20, box.y + 88, box.width - 40, 40 }, &new_name, new_folder ? "Folder name" : "File name", &submitted)) new_error[0] = 0;
 		if (!txt::empty(&new_error)) ui::text_fit(txt::view(&new_error), box.x + 20, box.y + 140, box.width - 40, 14, ui::RED);
 		if (ui::button({ box.x + 20, box.y + 176, 200, 40 }, "Cancel")) cancel = true;
-		if ((ui::button({ box.x + box.width - 220, box.y + 176, 200, 40 }, "Create", PRIMARY) || submitted) && create_new()) { new_open = false; ui::unfocus(); }
+		if ((ui::button({ box.x + box.width - 220, box.y + 176, 200, 40 }, new_rename ? "Rename" : "Create", PRIMARY) || submitted) && create_new()) { new_open = false; ui::unfocus(); }
 		else if (cancel) { new_open = false; ui::unfocus(); }
 	}
 	ui::layer = 0;

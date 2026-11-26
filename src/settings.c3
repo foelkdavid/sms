@@ -39,6 +39,7 @@ ui::Shortcut[*] shortcuts = {
 	{ "Ctrl + V", "Paste into this folder (files copied in any sms window or file manager)", false },
 	{ "Ctrl + N", "New folder", false },
 	{ "Ctrl + Shift + N", "New (empty) file", false },
+	{ "F2", "Rename the selected item (also in the right-click menu)", false },
 	{ "Delete", "Move to trash (or delete, see General)", false },
 	{ "Shift + Delete", "Delete permanently (asks first)", false },
 	{ "Drag onto a folder", "Move there; hold Ctrl to copy", false },
